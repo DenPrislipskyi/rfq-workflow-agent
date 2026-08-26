@@ -1,0 +1,39 @@
+# What the operator can change without a release.
+#
+# Most of this file used to be lists of who writes to us - customer domains,
+# supplier domains, portals, our own template phrases. Measured on the corpus,
+# removing every one of them changed nothing: accuracy stayed at 0.923 with the
+# same single miss. The model reads the text; it does not need a directory.
+#
+# The `Registries` model still carries those fields, so putting a list back is
+# an edit here and nothing in the code.
+#
+# "Who we are" is no longer written down either - it comes from MAILBOX_ADDRESS,
+# because the mailbox we watch is ours by definition.
+
+# Outlook labels stamped on a classified email, so the mailbox itself shows what
+# the agent decided. Names must match categories that already exist in the
+# mailbox, otherwise the label appears without colour.
+#
+# Every action maps to something on purpose: "no label" is what tells an
+# operator the email never reached the agent at all.
+outlook_categories:
+  by_action:
+    FORWARD_TO_DST: the chandler RFQ
+    # No dedicated label for these three yet, and they do need a person to route
+    # them - so they share the review label. Add `the chandler Routed` and split them out
+    # when the mailbox has it.
+    ROUTE_TO_CS: the chandler Review
+    ROUTE_TO_SOURCING: the chandler Review
+    ROUTE_TO_ORDER_TEAM: the chandler Review
+    HUMAN_REVIEW: the chandler Review
+    IGNORE: the chandler No action
+  needs_review: the chandler Review
+  error: the chandler Error
+
+# The two rules that still decide without the model, and how sure they are.
+fast_path:
+  min_body_chars: 10
+  confidence:
+    internal_only: 0.97
+    empty_body: 0.95

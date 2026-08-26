@@ -250,6 +250,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+/data
+/docs
 
 # Spyder project settings
 .spyderproject
@@ -312,3 +314,15 @@ local.py
 
 
 # End of https://www.toptal.com/developers/gitignore/api/python,pycharm,visualstudiocode
+
+# Real customer emails and decision log - never commit
+data/
+.DS_Store
+
+# Real customer emails. Reversible default: delete this line if the team decides
+# the corpus may live in git. See PROGRESS.md -> Open questions.
+tests/fixtures/
+
+# Eval reports hold model reasoning quoted from real customer emails.
+evals/dataset.jsonl
+evals/reports/
