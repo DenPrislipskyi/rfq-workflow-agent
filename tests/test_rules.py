@@ -8,8 +8,21 @@ from pathlib import Path
 
 import pytest
 
-from src.domain.enums import AttachmentKind, EmailCategory, SenderClass
-from src.domain.models import Attachment, EmailAddress, NormalizedEmail, SplitThread
+from src.domain.enums import (
+    AttachmentKind,
+    DecisionPath,
+    Direction,
+    EmailCategory,
+    RecommendedAction,
+    SenderClass,
+)
+from src.domain.models import (
+    Attachment,
+    ClassificationResult,
+    EmailAddress,
+    NormalizedEmail,
+    SplitThread,
+)
 from src.domain.rules.fast_path import match_fast_path
 from src.domain.rules.hints import build_hints, render_hints
 from src.domain.rules.registries import Registries
@@ -55,6 +68,49 @@ def test_without_a_mailbox_nobody_is_internal() -> None:
 
 def test_domains_are_matched_case_insensitively() -> None:
     assert REGISTRIES.is_internal_domain("Our-Company.com")
+
+
+# --------------------------------------------------------------------------- #
+# Outlook label names
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("action", list(RecommendedAction))
+@pytest.mark.parametrize("needs_review", [False, True])
+def test_a_decision_earns_exactly_one_label(action: RecommendedAction, needs_review: bool) -> None:
+    """Two labels would be two answers to "what happened to this email?".
+
+    The single pair, SSG RFQ beside SSG Not Sent, is added by the handler when a
+    forward does not happen - never by the category map itself.
+    """
+    result = ClassificationResult(
+        category=EmailCategory.NEW_RFQ,
+        direction=Direction.UNKNOWN,
+        requires_action=True,
+        is_rfq=True,
+        recommended_action=action,
+        confidence=0.9,
+        needs_human_review=needs_review,
+        decision_path=DecisionPath.LLM,
+    )
+
+    assert len(REGISTRIES.outlook_categories.for_result(result)) == 1
+
+
+def test_an_unsent_rfq_is_the_only_email_with_two_labels() -> None:
+    labels = REGISTRIES.outlook_categories
+    rfq = labels.by_action[RecommendedAction.FORWARD_TO_DST]
+
+    assert labels.plus_not_sent([rfq]) == ["SSG RFQ", "SSG Not Sent"]
+
+
+def test_every_label_matches_a_category_that_exists_in_the_mailbox() -> None:
+    """An operator creates these four by hand, so a typo here shows up as a
+    colourless label rather than as an error."""
+    labels = REGISTRIES.outlook_categories
+    names = labels.all_names()
+
+    assert names == {"SSG RFQ", "SSG Review", "SSG No action", "SSG Not Sent", "SSG Error"}
 
 
 SENDERS = [

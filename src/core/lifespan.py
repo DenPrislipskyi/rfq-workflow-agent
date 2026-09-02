@@ -11,7 +11,7 @@ from src.domain.rules.registries import Registries
 from src.infrastructure.llm.client import StructuredLLM
 from src.infrastructure.outlook.auth import GraphTokenProvider
 from src.infrastructure.outlook.client import GraphClient
-from src.infrastructure.outlook.mailbox import MailboxReader
+from src.infrastructure.outlook.mailbox import Mailbox
 from src.infrastructure.outlook.subscription import SubscriptionManager
 from src.infrastructure.storage.decisions import DecisionLog
 from src.services.classification.pipeline import ClassificationPipeline
@@ -37,7 +37,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
 
     # Read once at boot: a malformed registry file must break startup, not the
     # first email of the day.
-    registries = Registries.load(settings.REGISTRIES_PATH, mailbox=settings.MAILBOX_ADDRESS)
+    registries = Registries.load(
+        settings.REGISTRIES_PATH,
+        mailbox=settings.MAILBOX_ADDRESS,
+        region_mailboxes=settings.region_mailboxes,
+        region_cc=settings.region_cc,
+    )
     pipeline = ClassificationPipeline(
         llm=build_llm(settings),
         registries=registries,
@@ -67,11 +72,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
             ),
             base_url=settings.GRAPH_BASE_URL,
         )
-        mailbox = MailboxReader(graph_client, settings.MAILBOX_ADDRESS)
+        mailbox = Mailbox(graph_client, settings.MAILBOX_ADDRESS)
         notification_service = NotificationService(
             mailbox=mailbox,
             handler=ClassifyingEmailHandler(
-                triage, mailbox, registries.outlook_categories
+                triage,
+                mailbox,
+                registries,
+                forward_enabled=settings.FORWARD_ENABLED,
             ),
             client_state=settings.WEBHOOK_CLIENT_STATE,
         )
@@ -93,6 +101,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
             )
         else:
             logger.info("OUTLOOK_ENABLED=false - the mailbox is not watched, HTTP only")
+
+        if settings.FORWARD_ENABLED:
+            desks = {
+                key: region.forward_to or "NO ADDRESS SET"
+                for key, region in registries.regions.items()
+            }
+            logger.info("Forwarding is ON, RFQs go to %s", desks)
+        else:
+            logger.info("FORWARD_ENABLED=false - RFQs are labelled but not forwarded")
 
         try:
             yield LifespanState(

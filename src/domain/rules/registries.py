@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from src.domain.enums import RecommendedAction, SenderClass
 from src.domain.models import ClassificationResult
+from src.domain.rules.regions import Region
 
 
 def _lowercase(values: list[str]) -> list[str]:
@@ -41,28 +42,43 @@ class FastPathSettings(BaseModel):
 
 
 class OutlookCategories(BaseModel):
-    """Which Outlook labels a decision earns.
+    """Which Outlook label a decision earns.
 
-    Every action maps to something on purpose, because "no label" is what tells
-    an operator the email never reached the agent at all.
+    One label per email, because it answers "what happened to this?" and two
+    answers to one question is not a decision. `not_sent` is the exception and
+    the only one: it pairs with the RFQ label.
     """
 
     by_action: dict[RecommendedAction, str] = Field(default_factory=dict)
     needs_review: str | None = None
+    not_sent: str | None = None
     error: str | None = None
 
     def for_result(self, result: ClassificationResult) -> list[str]:
-        """Labels for one decision: where it goes, plus a flag if a human is needed."""
-        names = []
+        """The one label for a decision.
+
+        "A person must look at this" replaces the routing label rather than
+        joining it: an email waiting for a human has not been routed yet.
+        """
+        if result.needs_human_review and self.needs_review:
+            return [self.needs_review]
+
         routed = self.by_action.get(result.recommended_action)
-        if routed:
-            names.append(routed)
-        if result.needs_human_review and self.needs_review not in (None, *names):
-            names.append(self.needs_review)
-        return names
+        return [routed] if routed else []
+
+    def plus_not_sent(self, labels: list[str]) -> list[str]:
+        """Mark an RFQ that no desk received. The one email with two labels."""
+        if not self.not_sent or self.not_sent in labels:
+            return labels
+        return [*labels, self.not_sent]
 
     def for_failure(self) -> list[str]:
         return [self.error] if self.error else []
+
+    def all_names(self) -> set[str]:
+        """Every label this agent owns - how it recognises its own past work."""
+        names = {*self.by_action.values(), self.needs_review, self.not_sent, self.error}
+        return {name for name in names if name}
 
 
 class Registries(BaseModel):
@@ -81,6 +97,8 @@ class Registries(BaseModel):
     known_supplier_domains: list[str] = Field(default_factory=list)
     template_markers: dict[str, list[str]] = Field(default_factory=dict)
     outlook_categories: OutlookCategories = Field(default_factory=OutlookCategories)
+    # Keys are the region_hint values a caller may send, e.g. "uae".
+    regions: dict[str, Region] = Field(default_factory=dict)
     fast_path: FastPathSettings
 
     _normalise = field_validator(
@@ -91,15 +109,35 @@ class Registries(BaseModel):
     )(_lowercase)
 
     @classmethod
-    def load(cls, path: Path, *, mailbox: str | None = None) -> "Registries":
-        """Read the file, treating the watched mailbox's domain as our own.
+    def load(
+        cls,
+        path: Path,
+        *,
+        mailbox: str | None = None,
+        region_mailboxes: dict[str, str] | None = None,
+        region_cc: dict[str, list[str]] | None = None,
+    ) -> "Registries":
+        """Read the file, then fold in what comes from the environment.
 
-        Deriving it beats a second copy in YAML that has to be kept in step.
+        The watched mailbox's domain is ours by definition. The regional desk
+        addresses are real mailboxes, so the YAML holds only the rules for
+        recognising a region and every address arrives from Settings.
         """
         registries = cls.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+
         domain = mailbox.rsplit("@", 1)[-1].lower() if mailbox and "@" in mailbox else None
         if domain and domain not in registries.internal_domains:
             registries.internal_domains.append(domain)
+
+        for key, address in (region_mailboxes or {}).items():
+            if key in registries.regions and address:
+                registries.regions[key].forward_to = address
+
+        # No `and addresses` guard: an empty copy list is a valid setting.
+        for key, addresses in (region_cc or {}).items():
+            if key in registries.regions:
+                registries.regions[key].cc = addresses
+
         return registries
 
     def is_internal_domain(self, domain: str | None) -> bool:

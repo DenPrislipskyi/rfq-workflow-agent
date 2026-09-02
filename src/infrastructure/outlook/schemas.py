@@ -72,6 +72,7 @@ class EmailMessage(GraphModel):
     to_recipients: list[Recipient] = Field(default_factory=list, alias="toRecipients")
     cc_recipients: list[Recipient] = Field(default_factory=list, alias="ccRecipients")
     has_attachments: bool = Field(default=False, alias="hasAttachments")
+    categories: list[str] = Field(default_factory=list)
     body: MessageBody | None = None
     web_link: str | None = Field(default=None, alias="webLink")
     attachments: list[Attachment] = Field(default_factory=list)

@@ -1,18 +1,23 @@
+from collections.abc import Sequence
+from typing import Any
+
 from src.infrastructure.outlook.client import GraphClient
 from src.infrastructure.outlook.schemas import Attachment, EmailMessage
 
 # `body`, not `bodyPreview`: the preview is a ~255 character snippet, and a
 # classifier reading only that never sees the quoted thread below it.
+# `categories` is what lets the handler recognise a message it already finished:
+# Graph re-sends notifications, and a forward sent twice is two real emails.
 MESSAGE_FIELDS = (
     "id,subject,receivedDateTime,from,toRecipients,ccRecipients,"
-    "hasAttachments,body,webLink"
+    "hasAttachments,body,webLink,categories"
 )
 # Size is what separates a signature logo from a real attachment.
 ATTACHMENT_FIELDS = "name,size,contentType"
 
 
-class MailboxReader:
-    """Read access to one mailbox. The only place that builds mailbox paths."""
+class Mailbox:
+    """One mailbox, read and write. The only place that builds mailbox paths."""
 
     def __init__(self, client: GraphClient, mailbox_address: str) -> None:
         self._client = client
@@ -51,6 +56,26 @@ class MailboxReader:
             f"{self._root}/messages/{message_id}", {"categories": categories}
         )
 
+    async def forward(self, message_id: str, *, to: str, cc: Sequence[str] = ()) -> None:
+        """Forward the message as the mailbox itself, attachments included.
+
+        Graph builds the forward server-side, so nothing is re-composed here and
+        the copy lands in this mailbox's Sent Items. Recipients go inside
+        `message`, never beside it: Graph answers 400 to a request carrying
+        `toRecipients` in both places. Needs `Mail.Send`.
+        """
+        message: dict[str, Any] = {"toRecipients": [_recipient(to)]}
+        if cc:
+            message["ccRecipients"] = [_recipient(address) for address in cc]
+
+        # The empty comment is deliberate: the recipient sees the customer's
+        # email exactly as it arrived, with nothing written above it. Graph
+        # documents "" as a valid value, so the key stays rather than vanishing.
+        await self._client.post(
+            f"{self._root}/messages/{message_id}/forward",
+            {"comment": "", "message": message},
+        )
+
     async def _get_attachments(self, message_id: str) -> list[Attachment]:
         """A second call: Graph does not return attachment metadata with the message."""
         payload = await self._client.get(
@@ -58,3 +83,7 @@ class MailboxReader:
             params={"$select": ATTACHMENT_FIELDS},
         )
         return [Attachment.model_validate(item) for item in payload.get("value", [])]
+
+
+def _recipient(address: str) -> dict[str, Any]:
+    return {"emailAddress": {"address": address}}

@@ -32,6 +32,23 @@ class Settings(BaseSettings):
     # OpenAI: {"reasoning_effort": "medium"} · Anthropic: {"thinking": {"type": "adaptive"}}
     LLM_EXTRA_OPTIONS: dict[str, Any] = {}
 
+    # --- Forwarding ------------------------------------------------------------
+    # Off by default. This is the first action that sends mail to real people, so
+    # switching it on is a deliberate step taken after watching the labels.
+    # Needs the Mail.Send application permission with admin consent.
+    FORWARD_ENABLED: bool = False
+
+    # Where each regional desk's RFQs go. Real addresses, so they live here and
+    # never in the committed registries file. Adding a desk is one line here,
+    # one in `region_mailboxes`, and a block in registries.yaml.
+    UAE_MAILBOX: str = ""
+    SG_MAILBOX: str = ""
+
+    # Who is copied on a forward, comma separated. These addresses receive the
+    # customer's email in full, so keep the list to people who should see it.
+    UAE_CC: str = ""
+    SG_CC: str = ""
+
     # --- Classification pipeline ---------------------------------------------
     FAST_PATH_ENABLED: bool = True
     # The whole thread goes to the model; this only stops a runaway chain.
@@ -89,6 +106,25 @@ class Settings(BaseSettings):
     @property
     def notification_url(self) -> str:
         return f"{self.NGROK_URL.rstrip('/')}{'/webhooks/outlook'}"
+
+    @property
+    def region_mailboxes(self) -> dict[str, str]:
+        """Region key in registries.yaml -> the address its RFQs are forwarded to."""
+        return {"uae": self.UAE_MAILBOX, "sg": self.SG_MAILBOX}
+
+    @property
+    def region_cc(self) -> dict[str, list[str]]:
+        """Region key in registries.yaml -> who is copied on its forwards."""
+        return {"uae": _addresses(self.UAE_CC), "sg": _addresses(self.SG_CC)}
+
+
+def _addresses(value: str) -> list[str]:
+    """Split a comma-separated setting, tolerating spaces and a trailing comma.
+
+    The field stays a plain string because pydantic-settings parses a `list[str]`
+    as JSON, which "a@x.com,b@y.com" is not.
+    """
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 @lru_cache

@@ -1,7 +1,7 @@
 import logging
 from collections import OrderedDict
 
-from src.infrastructure.outlook.mailbox import MailboxReader
+from src.infrastructure.outlook.mailbox import Mailbox
 from src.infrastructure.outlook.schemas import ChangeNotificationCollection
 from src.services.handlers import ClassifyingEmailHandler
 
@@ -36,7 +36,7 @@ class NotificationService:
 
     def __init__(
         self,
-        mailbox: MailboxReader,
+        mailbox: Mailbox,
         handler: ClassifyingEmailHandler,
         client_state: str,
     ) -> None:
