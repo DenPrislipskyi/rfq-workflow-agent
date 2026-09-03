@@ -61,8 +61,8 @@ class Mailbox:
 
         Graph builds the forward server-side, so nothing is re-composed here and
         the copy lands in this mailbox's Sent Items. Recipients go inside
-        `message`, never beside it: Graph answers 400 to a request carrying
-        `toRecipients` in both places. Needs `Mail.Send`.
+        `message`, never beside it - Graph answers 400 to a request carrying
+        `toRecipients` in both places - and sending needs `Mail.Send`.
         """
         message: dict[str, Any] = {"toRecipients": [_recipient(to)]}
         if cc:

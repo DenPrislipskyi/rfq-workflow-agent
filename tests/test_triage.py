@@ -11,7 +11,7 @@ from typing import NamedTuple
 
 import pytest
 
-from src.domain.enums import Direction, EmailCategory, RecommendedAction
+from src.domain.enums import DeliveryOutcome, Direction, EmailCategory, RecommendedAction
 from src.domain.models import EmailAddress, NormalizedEmail
 from src.domain.rules.registries import OutlookCategories, Registries
 from src.infrastructure.outlook.schemas import EmailMessage
@@ -92,11 +92,21 @@ class FakeMailbox:
 
 
 def handler(
-    triage: EmailTriage, mailbox: FakeMailbox | None = None, *, forward_enabled: bool = False
+    triage: EmailTriage,
+    mailbox: FakeMailbox | None = None,
+    *,
+    forward_enabled: bool = False,
+    decisions: DecisionLog | None = None,
 ):
+    """The handler under test, plus the mailbox it thinks it is writing to.
+
+    `decisions` defaults to a journal that is switched off - only the tests
+    about the journal itself need the lines it would write.
+    """
     box = mailbox or FakeMailbox()
+    journal = decisions or DecisionLog(Path("unused.jsonl"), enabled=False, log_bodies=False)
     handler = ClassifyingEmailHandler(
-        triage, box, REGISTRIES, forward_enabled=forward_enabled
+        triage, box, REGISTRIES, journal, forward_enabled=forward_enabled
     )
     return handler, box
 
@@ -409,7 +419,8 @@ async def test_a_region_with_no_address_configured_is_flagged_not_sent(tmp_path:
     )
     triage, _, _ = build(tmp_path)
     box = FakeMailbox()
-    graph_handler = ClassifyingEmailHandler(triage, box, unconfigured, forward_enabled=True)
+    off = DecisionLog(Path("unused.jsonl"), enabled=False, log_bodies=False)
+    graph_handler = ClassifyingEmailHandler(triage, box, unconfigured, off, forward_enabled=True)
 
     await graph_handler.handle(graph_message("our RFQ, eta Fujairah"))
 
@@ -482,3 +493,142 @@ async def test_the_copy_list_never_leaks_into_the_recipient(tmp_path: Path) -> N
 
     assert box.forwards[0].to == UAE_DESK
     assert UAE_DESK not in box.forwards[0].cc
+
+
+# --------------------------------------------------------------------------- #
+# Journalling what became of the RFQ
+# --------------------------------------------------------------------------- #
+
+
+def delivery_of(journal: DecisionLog) -> dict:
+    return next(journal.deliveries())
+
+
+async def test_a_sent_rfq_is_journalled_against_its_decision(tmp_path: Path) -> None:
+    """Two lines, one id. That pair is what answers "where did my RFQ go?"."""
+    triage, journal, _ = build(tmp_path)
+    graph_handler, _ = handler(triage, forward_enabled=True, decisions=journal)
+
+    await graph_handler.handle(graph_message("our RFQ, eta Fujairah"))
+
+    decision, delivery = list(journal.records())
+    assert decision["type"] == "decision"
+    assert delivery["type"] == "delivery"
+    assert delivery["decision_id"] == decision["decision_id"]
+    assert delivery["outcome"] == DeliveryOutcome.SENT
+    assert delivery["forwarded_to"] == UAE_DESK
+    assert delivery["region"] == "uae"
+    assert delivery["region_rule"] == "keyword"
+    assert delivery["labels"] == ["SSG RFQ"]
+
+
+async def test_the_copy_list_is_journalled_too(tmp_path: Path) -> None:
+    """Who else received a customer's email has to be answerable later."""
+    triage, journal, _ = build(tmp_path)
+    graph_handler, _ = handler(triage, forward_enabled=True, decisions=journal)
+
+    await graph_handler.handle(graph_message("our RFQ, eta Fujairah"))
+
+    assert delivery_of(journal)["cc"] == ["uae-cc@example.invalid", "ops@example.invalid"]
+
+
+async def test_an_rfq_with_no_region_says_so_in_the_journal(tmp_path: Path) -> None:
+    triage, journal, _ = build(tmp_path)
+    graph_handler, _ = handler(triage, forward_enabled=True, decisions=journal)
+
+    await graph_handler.handle(graph_message("please quote, we need it soon"))
+
+    delivery = delivery_of(journal)
+    assert delivery["outcome"] == DeliveryOutcome.NO_REGION
+    assert delivery["forwarded_to"] is None
+    assert delivery["labels"] == ["SSG RFQ", "SSG Not Sent"]
+
+
+async def test_a_configured_region_with_no_address_is_a_different_outcome(tmp_path: Path) -> None:
+    """"Nobody set UAE_MAILBOX" and "I cannot tell the region" need different fixes."""
+    unconfigured = Registries.load(
+        Path("config/registries.yaml"),
+        mailbox="supply@our-company.com",
+        region_mailboxes={"sg": "sg-desk@example.invalid"},
+    )
+    triage, journal, _ = build(tmp_path)
+    graph_handler = ClassifyingEmailHandler(
+        triage, FakeMailbox(), unconfigured, journal, forward_enabled=True
+    )
+
+    await graph_handler.handle(graph_message("our RFQ, eta Fujairah"))
+
+    delivery = delivery_of(journal)
+    assert delivery["outcome"] == DeliveryOutcome.NO_ADDRESS
+    assert delivery["region"] == "uae"
+
+
+async def test_a_failed_forward_is_journalled_as_failed(tmp_path: Path) -> None:
+    triage, journal, _ = build(tmp_path)
+    graph_handler, _ = handler(
+        triage, FakeMailbox(forward_fails=True), forward_enabled=True, decisions=journal
+    )
+
+    await graph_handler.handle(graph_message("our RFQ, eta Fujairah"))
+
+    delivery = delivery_of(journal)
+    assert delivery["outcome"] == DeliveryOutcome.FAILED
+    assert delivery["region"] == "uae"
+
+
+async def test_the_flag_being_off_is_recorded_not_hidden(tmp_path: Path) -> None:
+    """Reading the journal alone must explain why an RFQ never moved."""
+    triage, journal, _ = build(tmp_path)
+    graph_handler, _ = handler(triage, decisions=journal)
+
+    await graph_handler.handle(graph_message("our RFQ, eta Fujairah"))
+
+    assert delivery_of(journal)["outcome"] == DeliveryOutcome.DISABLED
+
+
+async def test_an_unsure_rfq_is_recorded_as_unsure(tmp_path: Path) -> None:
+    settings = fake_settings()
+    unsure = LLMClassification(
+        category=EmailCategory.NEW_RFQ,
+        direction=Direction.INBOUND_CUSTOMER,
+        is_rfq=True,
+        confidence=0.70,
+        reasoning="Plausible but one signal is missing.",
+    )
+    journal = DecisionLog(tmp_path / "d.jsonl", enabled=True, log_bodies=False)
+    triage = EmailTriage(
+        ClassificationPipeline(FakeLLM(unsure), REGISTRIES, settings),
+        journal,
+        settings.PROMPT_VERSION,
+    )
+    graph_handler, box = handler(triage, forward_enabled=True, decisions=journal)
+
+    await graph_handler.handle(graph_message("our RFQ, eta Fujairah"))
+
+    assert box.forwards == []
+    assert delivery_of(journal)["outcome"] == DeliveryOutcome.UNSURE
+    assert delivery_of(journal)["labels"] == ["SSG Review"]
+
+
+async def test_an_email_that_goes_nowhere_gets_no_delivery_line(tmp_path: Path) -> None:
+    """Spam was never going anywhere; a line saying so would be noise."""
+    settings = fake_settings()
+    spam = LLMClassification(
+        category=EmailCategory.SPAM_MARKETING,
+        direction=Direction.UNKNOWN,
+        is_rfq=False,
+        confidence=0.95,
+        reasoning="A newsletter.",
+    )
+    journal = DecisionLog(tmp_path / "d.jsonl", enabled=True, log_bodies=False)
+    triage = EmailTriage(
+        ClassificationPipeline(FakeLLM(spam), REGISTRIES, settings),
+        journal,
+        settings.PROMPT_VERSION,
+    )
+    graph_handler, _ = handler(triage, forward_enabled=True, decisions=journal)
+
+    await graph_handler.handle(graph_message("our newsletter from Dubai"))
+
+    assert list(journal.deliveries()) == []
+    assert len(list(journal.decisions())) == 1

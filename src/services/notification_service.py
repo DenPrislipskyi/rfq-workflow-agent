@@ -62,6 +62,10 @@ class NotificationService:
 
             if self._processed.register(message_id):
                 message_ids.append(message_id)
+            else:
+                # Graph re-sends until it gets a 2xx it is happy with, so this
+                # is routine. Worth seeing when an email seems to be ignored.
+                logger.debug("Notification for %s seen before, dropped", message_id)
 
         return message_ids
 

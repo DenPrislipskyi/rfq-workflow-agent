@@ -50,13 +50,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
     )
     logger.info("Classifier ready: %s via %s", settings.LLM_MODEL, settings.LLM_PROVIDER)
 
+    # One journal, shared: triage writes the verdict, the handler writes what
+    # became of it, and the two lines are tied by the same decision id.
+    decisions = DecisionLog(
+        settings.DECISIONS_LOG_PATH,
+        enabled=settings.PERSIST_DECISIONS,
+        log_bodies=settings.LOG_EMAIL_BODIES,
+    )
+
     triage = EmailTriage(
         pipeline=pipeline,
-        decisions=DecisionLog(
-            settings.DECISIONS_LOG_PATH,
-            enabled=settings.PERSIST_DECISIONS,
-            log_bodies=settings.LOG_EMAIL_BODIES,
-        ),
+        decisions=decisions,
         prompt_version=settings.PROMPT_VERSION,
     )
 
@@ -79,6 +83,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
                 triage,
                 mailbox,
                 registries,
+                decisions,
                 forward_enabled=settings.FORWARD_ENABLED,
             ),
             client_state=settings.WEBHOOK_CLIENT_STATE,

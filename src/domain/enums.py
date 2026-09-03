@@ -71,6 +71,21 @@ class AttachmentKind(StrEnum):
     OTHER = "OTHER"
 
 
+class DeliveryOutcome(StrEnum):
+    """What became of an RFQ after it was classified.
+
+    Only recorded for emails the policy routed to DST - nothing else is ever
+    sent anywhere, so there is nothing to report about it.
+    """
+
+    SENT = "SENT"
+    DISABLED = "DISABLED"
+    UNSURE = "UNSURE"
+    NO_REGION = "NO_REGION"
+    NO_ADDRESS = "NO_ADDRESS"
+    FAILED = "FAILED"
+
+
 class SenderClass(StrEnum):
     """What the registries say about the sender of the newest message."""
 

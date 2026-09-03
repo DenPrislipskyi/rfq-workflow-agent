@@ -9,7 +9,13 @@ import hashlib
 import json
 from pathlib import Path
 
-from src.domain.enums import DecisionPath, Direction, EmailCategory, RecommendedAction
+from src.domain.enums import (
+    DecisionPath,
+    DeliveryOutcome,
+    Direction,
+    EmailCategory,
+    RecommendedAction,
+)
 from src.domain.models import (
     Attachment,
     ClassificationOutcome,
@@ -174,3 +180,90 @@ async def test_nothing_is_written_when_journalling_is_off(tmp_path: Path) -> Non
 
 def test_reading_a_journal_that_does_not_exist_yet_is_empty(tmp_path: Path) -> None:
     assert list(log(tmp_path).records()) == []
+
+
+# --------------------------------------------------------------------------- #
+# The inputs behind a verdict
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_line_records_how_the_email_was_split(tmp_path: Path) -> None:
+    """Thread splitting is the likeliest thing behind a wrong verdict.
+
+    Without these numbers a reader sees a bad answer and cannot tell the
+    model's mistake from the splitter's.
+    """
+    journal = log(tmp_path)
+    await journal.record(
+        source="http", email=email(), outcome=outcome(), prompt_version="v1"
+    )
+
+    thread = next(journal.decisions())["thread"]
+    assert set(thread) == {"is_reply", "quoted_messages", "latest_chars"}
+
+
+async def test_the_line_records_the_deterministic_signals(tmp_path: Path) -> None:
+    journal = log(tmp_path)
+    await journal.record(
+        source="http", email=email(), outcome=outcome(), prompt_version="v1"
+    )
+
+    hints = next(journal.decisions())["hints"]
+    assert set(hints) == {"sender_class", "portal", "subject_prefixes", "attachment_kinds"}
+
+
+async def test_regex_findings_are_not_stored_twice(tmp_path: Path) -> None:
+    """They already live under result.extracted; a second copy would drift."""
+    journal = log(tmp_path)
+    await journal.record(
+        source="http", email=email(), outcome=outcome(), prompt_version="v1"
+    )
+
+    entry = next(journal.decisions())
+    assert "signals" not in entry["hints"]
+    assert "vessel_name" in entry["result"]["extracted"]
+
+
+# --------------------------------------------------------------------------- #
+# Two kinds of line
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_delivery_needs_a_decision_to_hang_from(tmp_path: Path) -> None:
+    """Without an id there is nothing to tie the line to, so nothing is written."""
+    journal = log(tmp_path)
+
+    await journal.record_delivery(decision_id=None, outcome=DeliveryOutcome.SENT)
+
+    assert list(journal.records()) == []
+
+
+async def test_the_readers_separate_the_two_kinds(tmp_path: Path) -> None:
+    journal = log(tmp_path)
+    decision_id = await journal.record(
+        source="outlook", email=email(), outcome=outcome(), prompt_version="v1"
+    )
+    await journal.record_delivery(decision_id=decision_id, outcome=DeliveryOutcome.SENT)
+
+    assert len(list(journal.records())) == 2
+    assert len(list(journal.decisions())) == 1
+    assert len(list(journal.deliveries())) == 1
+
+
+async def test_a_line_written_before_type_existed_still_reads_as_a_decision(
+    tmp_path: Path,
+) -> None:
+    """The journal is append-only, so older lines cannot be migrated."""
+    path = tmp_path / "decisions.jsonl"
+    path.write_text('{"decision_id": "old", "result": {}}\n', encoding="utf-8")
+    journal = log(tmp_path)
+
+    assert [item["decision_id"] for item in journal.decisions()] == ["old"]
+
+
+async def test_journalling_off_writes_no_delivery_either(tmp_path: Path) -> None:
+    journal = log(tmp_path, enabled=False)
+
+    await journal.record_delivery(decision_id="anything", outcome=DeliveryOutcome.SENT)
+
+    assert list(journal.records()) == []

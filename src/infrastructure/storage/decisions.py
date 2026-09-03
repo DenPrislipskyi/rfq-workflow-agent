@@ -1,17 +1,18 @@
-"""Append-only journal of every decision: one JSON object per line, never rewritten.
+"""Append-only journal of what the agent did: one JSON object per line.
 
-A debugging trail today and the dataset for the next prompt later, which is why
-it exists before it is needed; `record()` is the only entry point, so a database
-can replace the file without touching anything above. `LOG_EMAIL_BODIES=false`
-hashes the body but keeps `reasoning` and `evidence`, which quote the email
-near-verbatim - treat the file as confidential, not anonymised.
+Two kinds of line, told apart by `type` and tied together by `decision_id`:
+`decision` the moment a verdict exists, `delivery` afterwards, once it is known
+where the email went - nothing is ever rewritten, so a failed delivery is a
+second line rather than an edit of the first. `LOG_EMAIL_BODIES=false` hashes
+the body but keeps `reasoning` and `evidence`, which quote the email
+near-verbatim, so treat the file as confidential rather than anonymised.
 """
 
 import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,9 +20,13 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from src.domain.enums import DeliveryOutcome
 from src.domain.models import ClassificationOutcome, NormalizedEmail
 
 logger = logging.getLogger(__name__)
+
+DECISION = "decision"
+DELIVERY = "delivery"
 
 
 class LoggedEmail(BaseModel):
@@ -43,7 +48,7 @@ class LoggedEmail(BaseModel):
 
 
 class DecisionLog:
-    """Writes one line per decision to a JSONL file."""
+    """Appends one line per event to a JSONL file."""
 
     def __init__(self, path: Path, *, enabled: bool, log_bodies: bool) -> None:
         self._path = path
@@ -77,11 +82,14 @@ class DecisionLog:
         decision_id = str(uuid4())
         await self._append(
             {
+                "type": DECISION,
                 "decision_id": decision_id,
                 "recorded_at": _now(),
                 "source": source,
                 "email": self._redact(email).model_dump(),
                 "result": outcome.result.model_dump(mode="json"),
+                "thread": _thread(outcome),
+                "hints": _hints(outcome),
                 "meta": {
                     "prompt_version": prompt_version,
                     "model": outcome.model,
@@ -93,14 +101,56 @@ class DecisionLog:
         )
         return decision_id
 
+    async def record_delivery(
+        self,
+        *,
+        decision_id: str | None,
+        outcome: DeliveryOutcome,
+        forwarded_to: str | None = None,
+        cc: Sequence[str] = (),
+        region: str | None = None,
+        region_rule: str | None = None,
+        labels: Sequence[str] = (),
+    ) -> None:
+        """Append what became of an RFQ, against the decision that produced it.
+
+        A second line rather than an edit of the first: the journal is
+        append-only, and a decision must survive even when the delivery that
+        follows it does not.
+        """
+        if not self._enabled or decision_id is None:
+            return
+
+        await self._append(
+            {
+                "type": DELIVERY,
+                "decision_id": decision_id,
+                "recorded_at": _now(),
+                "outcome": outcome.value,
+                "forwarded_to": forwarded_to,
+                "cc": list(cc),
+                "region": region,
+                "region_rule": region_rule,
+                "labels": list(labels),
+            }
+        )
+
     def records(self) -> Iterator[dict[str, Any]]:
-        """Every line, parsed. How anything reads the journal back."""
+        """Every line, parsed, of both kinds."""
         if not self._path.exists():
             return
         with self._path.open(encoding="utf-8") as file:
             for line in file:
                 if line.strip():
                     yield json.loads(line)
+
+    def decisions(self) -> Iterator[dict[str, Any]]:
+        """Verdicts only. Lines written before `type` existed count as verdicts."""
+        return (item for item in self.records() if item.get("type", DECISION) == DECISION)
+
+    def deliveries(self) -> Iterator[dict[str, Any]]:
+        """Where the RFQs went, one line each."""
+        return (item for item in self.records() if item.get("type") == DELIVERY)
 
     def _redact(self, email: NormalizedEmail) -> LoggedEmail:
         return LoggedEmail(
@@ -119,6 +169,35 @@ class DecisionLog:
         async with self._lock:
             with self._path.open("a", encoding="utf-8") as file:
                 file.write(line)
+
+
+def _thread(outcome: ClassificationOutcome) -> dict[str, Any]:
+    """How the email was cut up.
+
+    Thread splitting is the likeliest thing to have gone wrong behind a bad
+    verdict, and without these three numbers a reader cannot tell the model's
+    mistake from the splitter's.
+    """
+    return {
+        "is_reply": outcome.thread.is_reply,
+        "quoted_messages": len(outcome.thread.quoted_messages),
+        "latest_chars": len(outcome.thread.latest_message),
+    }
+
+
+def _hints(outcome: ClassificationOutcome) -> dict[str, Any]:
+    """The deterministic signals the prompt was given.
+
+    Only the ones that vary and steer an answer. Regex findings are left out -
+    they are already stored under `result.extracted`.
+    """
+    hints = outcome.hints
+    return {
+        "sender_class": hints.sender_class.value,
+        "portal": hints.portal,
+        "subject_prefixes": hints.subject_prefixes,
+        "attachment_kinds": [kind.value for kind in hints.attachment_kinds],
+    }
 
 
 def _digest(text: str) -> str:
