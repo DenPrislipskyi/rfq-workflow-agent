@@ -1,0 +1,27 @@
+# Everything the image must not carry. The first three blocks are not about
+# size: they are real customer data and live credentials.
+
+.env
+.env.*
+!.env.example
+
+data/
+docs/
+tests/fixtures/
+evals/reports/
+
+.git/
+.gitignore
+.venv/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+*.egg-info/
+
+.claude/
+.idea/
+.vscode/
+.DS_Store
+
+Dockerfile
+.dockerignore
