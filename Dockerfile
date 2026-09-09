@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # --- build: resolve dependencies into a virtualenv ---------------------------
 FROM python:3.14-slim AS builder
 
@@ -18,8 +16,9 @@ ENV UV_COMPILE_BYTECODE=1 \
 # Only the two files that decide the dependency set, so the layer is reused
 # whenever application code changes and the lockfile does not.
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+# No BuildKit cache mount: `az acr build` runs the classic Docker builder and
+# fails on `--mount`. A cache would only speed up repeated local builds anyway.
+RUN uv sync --frozen --no-dev
 
 
 # --- run ---------------------------------------------------------------------
