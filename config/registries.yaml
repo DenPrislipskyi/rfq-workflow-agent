@@ -67,6 +67,9 @@ regions:
   # `ports` are matched as substrings, so only the shortest distinctive form is
   # listed: "jebel ali" already catches "Port of Jebel Ali".
   uae:
+    # Exactly as the workbook's branch dropdown spells it: the port list the
+    # RFQ is validated against hangs off this value.
+    template_branch: UAE-DUBAI
     ports:
       - fujairah
       - jebel ali
@@ -99,6 +102,7 @@ regions:
       - dubai
 
   sg:
+    template_branch: SINGAPORE
     ports:
       - singapore
       - tuas

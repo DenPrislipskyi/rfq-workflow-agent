@@ -25,6 +25,12 @@ class Region(BaseModel):
 
     forward_to: str = ""
     cc: list[str] = Field(default_factory=list)
+    # The name this desk goes by in the workbook's own branch dropdown, which
+    # is what decides the port list. Spelled exactly as `$W$2:$W$7` has it, or
+    # left empty when the desk has no branch in the template yet.
+    template_branch: str = ""
+    # What this desk quotes in when the customer names no currency. One of the
+    # four the workbook offers, or empty to leave the cell blank instead.
     ports: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
     mailbox_markers: list[str] = Field(default_factory=list)

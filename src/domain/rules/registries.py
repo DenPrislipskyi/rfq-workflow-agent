@@ -100,7 +100,6 @@ class Registries(BaseModel):
     # Keys are the region_hint values a caller may send, e.g. "uae".
     regions: dict[str, Region] = Field(default_factory=dict)
     fast_path: FastPathSettings
-
     _normalise = field_validator(
         "internal_domains",
         "internal_system_senders",
