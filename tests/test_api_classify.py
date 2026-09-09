@@ -12,11 +12,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src import register_exceptions, register_routers
-from src.api.dependencies import get_triage
+from src.api.dependencies import get_llm_registry, get_triage
 from src.core.config import get_settings
 from src.domain.enums import Direction, EmailCategory
 from src.domain.rules.registries import Registries
 from src.infrastructure.llm.exceptions import LLMCallError, LLMParsingError, LLMTimeoutError
+from src.infrastructure.llm.registry import LLMRegistry, ModelSpec
 from src.infrastructure.storage.decisions import DecisionLog
 from src.services.classification.pipeline import ClassificationPipeline
 from src.services.classification.schemas import LLMClassification
@@ -55,8 +56,23 @@ def client(llm=None, journal: DecisionLog | None = None, **settings_overrides) -
     register_exceptions(app)
     register_routers(app)
     app.dependency_overrides[get_triage] = lambda: triage
+    app.dependency_overrides[get_llm_registry] = lambda: _registry(llm)
     app.dependency_overrides[get_settings] = lambda: settings
     return TestClient(app)
+
+
+def _registry(llm) -> LLMRegistry:
+    """A registry whose models are the same fake the pipeline already holds.
+
+    An override in a request must reach the fake rather than a provider, so the
+    factory ignores the spec and hands back the double.
+    """
+    fake_spec = ModelSpec(provider="fake", model="fake-model", api_key="key")
+    return LLMRegistry(
+        text=fake_spec,
+        documents=fake_spec,
+        factory=lambda spec: llm or FakeLLM(NEW_RFQ_ANSWER),
+    )
 
 
 STRUCTURED = {
@@ -206,3 +222,29 @@ def test_a_classified_email_is_journalled_and_gets_an_id(tmp_path: Path) -> None
     assert entries[0]["result"]["category"] == body["category"]
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Choosing a model per request
+# --------------------------------------------------------------------------- #
+
+
+def test_no_model_in_the_request_uses_the_configured_one() -> None:
+    """The ordinary path must not go anywhere near the registry."""
+    assert client().post(URL, json=STRUCTURED).status_code == 200
+
+
+def test_a_named_model_still_answers_and_is_reported() -> None:
+    """`meta.model` is what makes an A/B run readable afterwards."""
+    response = client().post(URL, json={**STRUCTURED, "model": "challenger"})
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["model"] is not None
+
+
+def test_a_provider_this_deployment_has_no_key_for_is_a_bad_request() -> None:
+    """400, not 502: nothing downstream failed, the caller named something absent."""
+    response = client().post(URL, json={**STRUCTURED, "provider": "mystery"})
+
+    assert response.status_code == 400
+    assert "mystery" in response.json()["message"]

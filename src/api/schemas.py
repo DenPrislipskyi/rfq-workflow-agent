@@ -51,6 +51,12 @@ class ClassifyEmailRequest(BaseModel):
 
     raw_text: str | None = None
 
+    # Answer this one email with a named model instead of the configured one.
+    # For evals and A/B runs; everything else about the call stays identical,
+    # and `model` in the response says which one actually answered.
+    model: str | None = None
+    provider: str | None = None
+
     message_id: str | None = None
     conversation_id: str | None = None
     received_at: datetime | None = None

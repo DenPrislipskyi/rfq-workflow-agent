@@ -6,18 +6,41 @@ is three environment values - LLM_PROVIDER, LLM_MODEL, LLM_API_KEY - plus the
 matching `langchain-*` package.
 """
 
+import logging
 import time
+from base64 import b64encode
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from langchain.chat_models import init_chat_model
+from langchain_core.messages.content import create_image_block
 from langchain_core.runnables import Runnable
 from pydantic import BaseModel
 
+from src.core.logging import tally
 from src.infrastructure.llm.exceptions import LLMCallError, LLMParsingError, LLMTimeoutError
 
+logger = logging.getLogger(__name__)
+
+# A piece of one message: text, or an image built by `image_block`.
+type ContentBlock = dict[str, Any]
+# Plain text covers most prompts; a list of blocks is what carries a scan or a
+# photo alongside the words describing it.
+type MessageContent = str | list[ContentBlock]
 # Role/content pairs, e.g. ("system", "..."), ("human", "..."), ("ai", "...").
-type Messages = list[tuple[str, str]]
+type Messages = list[tuple[str, MessageContent]]
+
+
+def image_block(data: bytes, media_type: str) -> ContentBlock:
+    """One image, ready to sit beside text in a human message.
+
+    Base64 rather than a URL: the bytes came out of an email attachment and are
+    never served from anywhere. LangChain's factory is used instead of a hand
+    written dict so the block keeps whatever shape the installed version expects.
+    """
+    return create_image_block(
+        base64=b64encode(data).decode("ascii"), mime_type=media_type
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,13 +122,38 @@ class StructuredLLM:
 
         # Not every provider reports token usage.
         usage = getattr(answer["raw"], "usage_metadata", None) or {}
-        return LLMResult(
+        result = LLMResult(
             value=answer["parsed"],
             model=self._model,
             latency_ms=latency_ms,
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),
         )
+        self._account_for(schema, result)
+        return result
+
+    def _account_for(self, schema: type[BaseModel], result: LLMResult[Any]) -> None:
+        """One line per call, and one number per email.
+
+        The only place in the service that knows a model was asked anything, so
+        it is the only place that has to say so. DEBUG rather than INFO because
+        an RFQ makes up to eight of these and the closing line already carries
+        their total - this level is for the run where one call has to be found.
+        """
+        logger.debug(
+            "Asked %s of %s: %d ms, %s->%s tok",
+            schema.__name__,
+            result.model,
+            result.latency_ms,
+            result.input_tokens if result.input_tokens is not None else "?",
+            result.output_tokens if result.output_tokens is not None else "?",
+        )
+        if (spent := tally()) is not None:
+            spent.record(
+                ms=result.latency_ms,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+            )
 
     def _runnable(self, schema: type[BaseModel]) -> Runnable:
         """The call chain for one schema.

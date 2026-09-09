@@ -46,6 +46,17 @@ class FileNameLongException(APIException):
         super().__init__(message)
 
 
+class UnknownProviderException(APIException):
+    """A caller asked for a provider this deployment holds no key for.
+
+    400 rather than 502: nothing downstream failed, the request named something
+    that does not exist here.
+    """
+
+    status_code = 400
+    default_message = "Unknown model provider"
+
+
 class LLMUnavailableException(APIException):
     status_code = 502
     default_message = "The language model is unavailable"
