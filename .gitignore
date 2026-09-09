@@ -251,7 +251,11 @@ ENV/
 env.bak/
 venv.bak/
 /data
+# Everything in here stays out of git: the client's master workbook, their
+# finished RFQs, the mapping notes, real emails - and our own working notes
+# about all of it.
 /docs
+/archive
 
 # Spyder project settings
 .spyderproject
