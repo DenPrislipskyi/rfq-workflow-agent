@@ -55,11 +55,38 @@ class MessageBody(GraphModel):
 
 
 class Attachment(GraphModel):
-    """Name and size are enough: Phase 1 never opens an attachment."""
+    """One attachment's metadata. The bytes are fetched separately.
 
+    `odata_type` is what separates the three kinds Graph returns from the same
+    collection, and they behave differently enough that guessing is not an
+    option: a `referenceAttachment` is a OneDrive link with no bytes anywhere,
+    and an `itemAttachment` is a whole message that needs `$expand` instead.
+    """
+
+    id: str | None = None
     name: str | None = None
     size: int | None = None
     content_type: str | None = Field(default=None, alias="contentType")
+    is_inline: bool = Field(default=False, alias="isInline")
+    odata_type: str | None = Field(default=None, alias="@odata.type")
+
+    @property
+    def is_reference(self) -> bool:
+        return (self.odata_type or "").endswith("referenceAttachment")
+
+    @property
+    def is_item(self) -> bool:
+        return (self.odata_type or "").endswith("itemAttachment")
+
+    @property
+    def is_file(self) -> bool:
+        """The default reading when Graph omits the annotation.
+
+        Every attachment that is not explicitly a link or a nested item is a
+        file, and asking for its bytes is safe: a wrong guess costs one failed
+        request, which the caller turns into a warning.
+        """
+        return not (self.is_reference or self.is_item)
 
 
 class EmailMessage(GraphModel):
