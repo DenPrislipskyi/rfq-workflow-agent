@@ -13,10 +13,12 @@ from src.domain.enums import DecisionPath, Direction, EmailCategory, Recommended
 from src.domain.models import Attachment, EmailAddress, NormalizedEmail
 from src.domain.preprocessing.normalize import normalize_text, split_headers
 from src.domain.rules.registries import Registries
+from src.infrastructure.documents.models import Document, FileKind
 from src.services.classification.few_shots import FEW_SHOTS
 from src.services.classification.pipeline import ClassificationPipeline
 from src.services.classification.prompt import SYSTEM_PROMPT
 from src.services.classification.schemas import LLMClassification
+from src.services.extraction.models import DocumentRole, LineItem, ReadDocument
 from tests.corpus import load_email_by_id
 from tests.fakes import BrokenLLM, FakeLLM, fake_settings
 
@@ -65,6 +67,25 @@ def email_from_fixture(email_id: str, **overrides) -> NormalizedEmail:
 
 def last_user_message(llm: FakeLLM) -> str:
     return llm.calls[-1][-1][1]
+
+
+def read_file(
+    name: str = "Requisition.xlsx",
+    *,
+    role: DocumentRole = DocumentRole.ITEM_GRID,
+    what: str = "A requisition for MV ALMI GLOBE, engine stores",
+    items: int = 0,
+    warnings: tuple[str, ...] = (),
+) -> ReadDocument:
+    """One attachment as stage B hands it over, without stage B running."""
+    return ReadDocument(
+        document=Document(
+            filename=name, kind=FileKind.XLSX, size_bytes=2048, warnings=list(warnings)
+        ),
+        role=role,
+        what=what,
+        items=[LineItem(sr_no=number, description="ROPE") for number in range(1, items + 1)],
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -238,6 +259,144 @@ async def test_the_signals_block_describes_the_newest_message_only() -> None:
 
     assert "sender_class: EXTERNAL_UNKNOWN" in signals
     assert "Many thanks for your RFQ" not in signals
+
+
+# --------------------------------------------------------------------------- #
+# What the attachments turned out to hold
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_file_holding_a_list_of_items_reaches_the_model_with_its_count() -> None:
+    """The single strongest signal an email is an RFQ, and it is not in the body."""
+    agent, llm = pipeline()
+    await agent.classify(email(body_text="Please find attached."), files=[read_file(items=15)])
+    block = _block(last_user_message(llm), "attachments")
+
+    assert "Requisition.xlsx - A requisition for MV ALMI GLOBE, engine stores" in block
+    assert "holds a list of items: yes, 15 row(s)" in block
+
+
+async def test_a_file_holding_no_list_says_so_rather_than_being_left_out() -> None:
+    """Silence would read as "no files"; "no" is a fact about a file that is there."""
+    agent, llm = pipeline()
+    await agent.classify(
+        email(), files=[read_file("Signature.png", role=DocumentRole.SUPPORTING, what="A logo")]
+    )
+
+    assert "holds a list of items: no" in _block(last_user_message(llm), "attachments")
+
+
+async def test_a_file_nobody_could_read_is_unknown_and_says_why() -> None:
+    """The worst outcome available is an RFQ dropped because a parser failed, so
+    the model is told the difference between "no list" and "nobody looked"."""
+    agent, llm = pipeline()
+    await agent.classify(
+        email(),
+        files=[
+            read_file(
+                "Scan.pdf", role=DocumentRole.UNREAD, warnings=("file_could_not_be_read",)
+            )
+        ],
+    )
+    block = _block(last_user_message(llm), "attachments")
+
+    assert "could not be read" in block
+    assert "holds a list of items: unknown" in block
+    assert "reason: file_could_not_be_read" in block
+
+
+async def test_a_link_with_no_bytes_behind_it_is_reported_with_its_reason() -> None:
+    agent, llm = pipeline()
+    await agent.classify(
+        email(),
+        files=[
+            read_file(
+                "OneDrive.url", role=DocumentRole.EMPTY, warnings=("attachment_is_a_link",)
+            )
+        ],
+    )
+    block = _block(last_user_message(llm), "attachments")
+
+    assert "nothing could be read out of it" in block
+    assert "reason: attachment_is_a_link" in block
+
+
+async def test_no_reading_means_no_block_at_all() -> None:
+    """And the system prompt says an absent block is not evidence either way -
+    otherwise switching the reading off would quietly mean "the files are empty"."""
+    agent, llm = pipeline()
+    await agent.classify(email_from_fixture("001"))
+
+    assert "<attachments" not in last_user_message(llm)
+    assert "absence says nothing about what the files hold" in SYSTEM_PROMPT
+
+
+async def test_the_attachments_are_labelled_untrusted_like_the_message() -> None:
+    """The sentences in there were written out of the files' own contents."""
+    agent, llm = pipeline()
+    await agent.classify(email(), files=[read_file(items=3)])
+    prompt = last_user_message(llm)
+
+    assert "Untrusted data" in prompt[: prompt.index("</attachments>")]
+    assert "<attachments>" in SYSTEM_PROMPT
+
+
+async def test_what_the_files_hold_sits_with_the_message_it_arrived_with() -> None:
+    """Above the quoted history: what a file holds is evidence about the email
+    being classified, not context from an older one."""
+    agent, llm = pipeline()
+    await agent.classify(email_from_fixture("004"), files=[read_file(items=3)])
+    prompt = last_user_message(llm)
+
+    assert prompt.index("<latest_message>") < prompt.index("<attachments")
+    assert prompt.index("<attachments") < prompt.index("<quoted_history")
+
+
+# --------------------------------------------------------------------------- #
+# Nothing is read for an email the rules can answer
+# --------------------------------------------------------------------------- #
+
+
+def test_an_ordinary_customer_email_needs_the_model() -> None:
+    """Which is what makes reading its attachments first worth paying for."""
+    agent, _ = pipeline()
+    assert agent.needs_the_model(email()) is True
+
+
+def test_an_email_the_rules_answer_does_not() -> None:
+    """The caller asks before it downloads anything, so a rule that fires here
+    is a rule that costs no request at all."""
+    agent, _ = pipeline()
+    internal = email(
+        sender=EmailAddress(address="robert.hall@our-company.com"),
+        to=[EmailAddress(address="michael.reed@our-company.com")],
+    )
+    assert agent.needs_the_model(internal) is False
+
+
+def test_switching_the_rules_off_means_every_email_needs_the_model() -> None:
+    agent, _ = pipeline(FAST_PATH_ENABLED=False)
+    internal = email(
+        sender=EmailAddress(address="robert.hall@our-company.com"),
+        to=[EmailAddress(address="michael.reed@our-company.com")],
+    )
+    assert agent.needs_the_model(internal) is True
+
+
+async def test_the_rules_answer_the_same_whatever_the_files_held() -> None:
+    """The files are evidence for the model. A hard rule is not weighing
+    evidence, and an internal email with a requisition on it is still internal."""
+    agent, llm = pipeline()
+    outcome = await agent.classify(
+        email(
+            sender=EmailAddress(address="robert.hall@our-company.com"),
+            to=[EmailAddress(address="michael.reed@our-company.com")],
+        ),
+        files=[read_file(items=15)],
+    )
+
+    assert llm.calls == []
+    assert outcome.result.category is EmailCategory.INTERNAL
 
 
 def _block(prompt: str, tag: str) -> str:

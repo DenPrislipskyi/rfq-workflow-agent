@@ -212,6 +212,37 @@ async def test_the_line_records_the_deterministic_signals(tmp_path: Path) -> Non
     assert set(hints) == {"sender_class", "portal", "subject_prefixes", "attachment_kinds"}
 
 
+async def test_a_verdict_that_saw_no_files_says_so_rather_than_saying_none(
+    tmp_path: Path,
+) -> None:
+    """`null` and `[]` are different answers. This email has an attachment and
+    the verdict was taken without reading it, which is what `null` means - an
+    empty list would claim the reader looked and found nothing."""
+    journal = log(tmp_path)
+    await record(journal)
+
+    entry = next(journal.decisions())
+    assert entry["attachments_read"] is None
+    assert entry["email"]["attachment_names"] == ["E_QUOT_XLS_0015.XLSX"]
+
+
+async def test_what_the_verdict_was_shown_of_the_files_is_kept_verbatim(
+    tmp_path: Path,
+) -> None:
+    """Shaped by the caller: the journal must not learn what a read file is."""
+    journal = log(tmp_path)
+    seen = [{"origin": "E_QUOT_XLS_0015.XLSX", "role": "ITEM_GRID", "items": 15}]
+    await journal.record(
+        source="http",
+        email=email(),
+        outcome=outcome(),
+        prompt_version="v1",
+        attachments=seen,
+    )
+
+    assert next(journal.decisions())["attachments_read"] == seen
+
+
 async def test_regex_findings_are_not_stored_twice(tmp_path: Path) -> None:
     """They already live under result.extracted; a second copy would drift."""
     journal = log(tmp_path)

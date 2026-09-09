@@ -63,6 +63,7 @@ class Sent(NamedTuple):
     to: str
     cc: list[str]
     comment: str = ""
+    attachment: str | None = None
 
 
 class FakeMailbox:
@@ -85,10 +86,20 @@ class FakeMailbox:
             raise RuntimeError("Graph said no")
         self.labels.append(categories)
 
-    async def forward(self, message_id: str, *, to: str, cc: Sequence[str] = ()) -> None:
+    async def forward(
+        self,
+        message_id: str,
+        *,
+        to: str,
+        cc: Sequence[str] = (),
+        comment: str = "",
+        attachment=None,
+    ) -> None:
         if self._forward_fails:
             raise RuntimeError("Graph said no")
-        self.forwards.append(Sent(to, list(cc)))
+        self.forwards.append(
+            Sent(to, list(cc), comment, attachment.filename if attachment else None)
+        )
 
 
 def handler(

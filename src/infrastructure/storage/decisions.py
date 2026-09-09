@@ -1,7 +1,9 @@
 """Append-only journal of what the agent did: one JSON object per line.
 
 Two kinds of line, told apart by `type` and tied together by `decision_id`:
-`decision` the moment a verdict exists, `delivery` afterwards, once it is known
+`decision` the moment a verdict exists - carrying what the attachments turned
+out to hold, when they were read first - `extraction` once the RFQ has been read
+out of the email and its attachments, `delivery` afterwards, once it is known
 where the email went - nothing is ever rewritten, so a failed delivery is a
 second line rather than an edit of the first. `LOG_EMAIL_BODIES=false` hashes
 the body but keeps `reasoning` and `evidence`, which quote the email
@@ -26,6 +28,7 @@ from src.domain.models import ClassificationOutcome, NormalizedEmail
 logger = logging.getLogger(__name__)
 
 DECISION = "decision"
+EXTRACTION = "extraction"
 DELIVERY = "delivery"
 
 
@@ -70,11 +73,18 @@ class DecisionLog:
         email: NormalizedEmail,
         outcome: ClassificationOutcome,
         prompt_version: str,
+        attachments: Sequence[dict[str, Any]] | None = None,
     ) -> str | None:
         """Append one decision and return its id, or None when journalling is off.
 
         The id ties a response the caller received to the line on disk, so a
         wrong answer can be looked up rather than described from memory.
+
+        `attachments` is what the verdict was shown of the files, shaped by the
+        caller - the journal must not learn what a read attachment is. `null`
+        on the line means the files were not read before the verdict, which is
+        a different thing from an email that had none: `email.attachment_names`
+        says which.
         """
         if not self._enabled:
             return None
@@ -90,6 +100,7 @@ class DecisionLog:
                 "result": outcome.result.model_dump(mode="json"),
                 "thread": _thread(outcome),
                 "hints": _hints(outcome),
+                "attachments_read": list(attachments) if attachments is not None else None,
                 "meta": {
                     "prompt_version": prompt_version,
                     "model": outcome.model,
@@ -111,6 +122,8 @@ class DecisionLog:
         region: str | None = None,
         region_rule: str | None = None,
         labels: Sequence[str] = (),
+        labelled: bool = True,
+        attached: str | None = None,
     ) -> None:
         """Append what became of an RFQ, against the decision that produced it.
 
@@ -132,6 +145,37 @@ class DecisionLog:
                 "region": region,
                 "region_rule": region_rule,
                 "labels": list(labels),
+                # Whether Outlook took them. `false` means the mailbox copy
+                # carries no mark - which is also the dedupe that stops this
+                # email being forwarded a second time, so the line has to say
+                # it rather than report the names we meant to write.
+                "labelled": labelled,
+                # The filled form, when the forward carried one. `null` against
+                # a SENT outcome means the desk got the customer's email and
+                # nothing else, and the extraction line above says why.
+                "attached": attached,
+            }
+        )
+
+    async def record_extraction(
+        self, *, decision_id: str | None, payload: dict[str, Any]
+    ) -> None:
+        """Append what was read out of the RFQ and its attachments.
+
+        A third line against the same decision. The caller shapes the payload,
+        because the journal must not learn what an extraction is - and because
+        the question this line exists to answer, "why is this cell blank?", is
+        only answerable by whoever left it blank.
+        """
+        if not self._enabled or decision_id is None:
+            return
+
+        await self._append(
+            {
+                "type": EXTRACTION,
+                "decision_id": decision_id,
+                "recorded_at": _now(),
+                **payload,
             }
         )
 
@@ -151,6 +195,10 @@ class DecisionLog:
     def deliveries(self) -> Iterator[dict[str, Any]]:
         """Where the RFQs went, one line each."""
         return (item for item in self.records() if item.get("type") == DELIVERY)
+
+    def extractions(self) -> Iterator[dict[str, Any]]:
+        """What was read out of each RFQ, one line each."""
+        return (item for item in self.records() if item.get("type") == EXTRACTION)
 
     def _redact(self, email: NormalizedEmail) -> LoggedEmail:
         return LoggedEmail(

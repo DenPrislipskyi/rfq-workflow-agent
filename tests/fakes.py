@@ -51,6 +51,9 @@ def fake_settings(**overrides: object) -> Settings:
     defaults: dict[str, object] = {
         # Off by default: a test must never open a Graph subscription.
         "OUTLOOK_ENABLED": False,
+        # Off for the same reason: a test must never leave a 13 MB workbook in
+        # the working tree. The tests that want one point it at `tmp_path`.
+        "WORKBOOKS_ENABLED": False,
         "LLM_PROVIDER": "fake",
         "LLM_MODEL": "fake-model",
         "LLM_API_KEY": "test-key",

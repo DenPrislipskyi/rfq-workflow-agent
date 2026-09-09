@@ -25,6 +25,7 @@ from src.domain.rules.registries import Registries
 from src.infrastructure.llm.client import LLM
 from src.services.classification.prompt import build_messages
 from src.services.classification.schemas import LLMClassification
+from src.services.extraction.models import ReadDocument
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +42,43 @@ class ClassificationPipeline:
             review=settings.CONFIDENCE_REVIEW_THRESHOLD,
         )
 
-    async def classify(self, email: NormalizedEmail) -> ClassificationOutcome:
-        """Split, clean, try the hard rules, else ask the model, then apply the policy."""
-        thread = split_thread(
-            email.body_text,
-            min_latest_chars=self._settings.MIN_LATEST_CHARS_FOR_VALID_SPLIT,
-        )
-        thread = _without_boilerplate(thread)
+    def needs_the_model(self, email: NormalizedEmail) -> bool:
+        """Whether the hard rules leave this email for the model to answer.
+
+        Asked before anything is downloaded. Reading the attachments can only
+        change an answer the model gives, so an email the rules already settled
+        must not cost a single request - which is what keeps the fast path the
+        cost guard it was built to be.
+
+        The rules do run twice on such an email, once here and once inside
+        `classify`. They are a thread split and a handful of regexes against a
+        model call per attached file, and they are pure, so the second run
+        cannot disagree with the first.
+        """
+        if not self._settings.FAST_PATH_ENABLED:
+            return True
+        return match_fast_path(email, self._read_thread(email), self._registries) is None
+
+    async def classify(
+        self,
+        email: NormalizedEmail,
+        *,
+        llm: LLM | None = None,
+        files: list[ReadDocument] | None = None,
+    ) -> ClassificationOutcome:
+        """Split, clean, try the hard rules, else ask the model, then apply the policy.
+
+        `llm` replaces the configured one for this call only, so an eval can run
+        the same corpus through two models. The pipeline still depends on the
+        `LLM` protocol alone and knows nothing about the registry that chose it.
+
+        `files` are the attachments after stage B has read them. They reach the
+        model and nothing else: what a file holds is evidence, while the rules
+        and the policy work on the message. An email whose body is "please find
+        attached" carries no evidence at all, and this is where that evidence
+        comes from.
+        """
+        thread = self._read_thread(email)
         hints = build_hints(email, thread, self._registries)
 
         if self._settings.FAST_PATH_ENABLED:
@@ -60,8 +91,9 @@ class ClassificationPipeline:
                     hints=hints,
                 )
 
-        answer = await self._llm.invoke(
-            build_messages(email, thread, hints, self._settings), LLMClassification
+        answer = await (llm or self._llm).invoke(
+            build_messages(email, thread, hints, self._settings, files=files),
+            LLMClassification,
         )
         result = self._finalize(_from_model(answer.value), email, thread, hints)
 
@@ -81,6 +113,16 @@ class ClassificationPipeline:
             input_tokens=answer.input_tokens,
             output_tokens=answer.output_tokens,
         )
+
+    def _read_thread(self, email: NormalizedEmail) -> SplitThread:
+        """The body cut into messages and cleaned - what both the rules and the
+        prompt work on, and the one place that decides what "the newest
+        message" means."""
+        thread = split_thread(
+            email.body_text,
+            min_latest_chars=self._settings.MIN_LATEST_CHARS_FOR_VALID_SPLIT,
+        )
+        return _without_boilerplate(thread)
 
     def _finalize(
         self, draft: Draft, email: NormalizedEmail, thread: SplitThread, hints: Hints
