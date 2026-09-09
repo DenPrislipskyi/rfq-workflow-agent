@@ -8,7 +8,7 @@ from src.core.logging import configure_logging
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    configure_logging(settings.LOG_LEVEL)
+    configure_logging(settings.LOG_LEVEL, settings.LOG_LIBRARY_LEVEL)
 
     app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
 
