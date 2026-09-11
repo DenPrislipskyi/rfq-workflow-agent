@@ -235,12 +235,24 @@ def build_handler(
     workbooks: bool = True,
     llm=None,
     reads_attachments: bool = True,
+    records=None,
+    matching=None,
+    catalog=None,
 ):
+    """The handler as the composition root builds it, with fakes underneath.
+
+    `records` goes to triage as well as to the handler: triage is what opens a
+    record, and a handler holding a different store would write updates to a
+    folder nobody created.
+    """
     settings = fake_settings()
     llm = llm or Router()
     journal = DecisionLog(tmp_path / "decisions.jsonl", enabled=True, log_bodies=False)
     triage = EmailTriage(
-        ClassificationPipeline(llm, REGISTRIES, settings), journal, settings.PROMPT_VERSION
+        ClassificationPipeline(llm, REGISTRIES, settings),
+        journal,
+        settings.PROMPT_VERSION,
+        records=records,
     )
     box = mailbox or FakeMailbox()
 
@@ -264,7 +276,11 @@ def build_handler(
         forward_enabled=True,
         reads_attachments=reads_attachments,
         extraction=pipeline,
-        workbooks=builder)
+        workbooks=builder,
+        records=records,
+        matching=matching,
+        catalog=catalog,
+    )
     return handler, box, journal
 
 

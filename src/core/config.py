@@ -125,6 +125,68 @@ class Settings(BaseSettings):
     PROMPT_VERSION: str = "v1.0.0"
     REGISTRIES_PATH: Path = Path("config/registries.yaml")
 
+    # --- Catalogue -----------------------------------------------------------
+    # Our own product list: the sheet the desk keeps by hand, which is why the
+    # source is a spreadsheet rather than a file in this repository. It is read
+    # into a snapshot on disk and indexed in memory; nothing on the path of an
+    # arriving email ever talks to Google.
+    #
+    # The sheet has to be published - Share -> Anyone with the link -> Viewer -
+    # because the export endpoint is fetched without credentials. Leave the id
+    # empty to work from the snapshot alone.
+    CATALOG_SHEET_ID: str = ""
+    # The tab, as it appears in the sheet's own URL after `gid=`.
+    CATALOG_SHEET_GID: str = "0"
+    CATALOG_SNAPSHOT_PATH: Path = Path("data/catalog/items.csv")
+    CATALOG_REFRESH_MINUTES: int = 10
+    # Which columns carry the two things a match needs. Matched against the
+    # sheet's own headings ignoring case and spacing.
+    CATALOG_CODE_COLUMN: str = "Item Code"
+    CATALOG_DESCRIPTION_COLUMN: str = "Item Description"
+    # Optional, and worth setting when the sheet has one: a customer who quotes
+    # any code at all usually quotes their own, not ours. It is a second way
+    # into the same item, never a second answer - a code and a description are
+    # two claims, and the shortlist says when they disagree.
+    CATALOG_CUSTOMER_CODE_COLUMN: str = ""
+    # How a customer once asked for the same product. Kept on every item -
+    # whatever chooses between candidates should see it - but searched only
+    # when the switch below is on.
+    CATALOG_CUSTOMER_DESCRIPTION_COLUMN: str = ""
+    # Measured, not assumed: on a sheet that mentions each product once, adding
+    # these wordings to the index made the ranking worse rather than better,
+    # because customers' wordings of similar products differ by one token.
+    # Turn on and re-run `catalog_recall` once products carry several wordings.
+    CATALOG_INDEX_CUSTOMER_DESCRIPTION: bool = False
+    # How many candidates a line of an RFQ is shortlisted down to. This is the
+    # ceiling on everything that comes after: a model cannot choose an item it
+    # was never shown, so raise it before blaming the model.
+    #
+    # Five because that is where `catalog_recall` stops improving - @5 and @20
+    # score the same - and every candidate past it is prompt spent on an option
+    # nobody picks.
+    CATALOG_SHORTLIST: int = 5
+    # Match each line of an RFQ against the catalogue. Two model calls per RFQ,
+    # whatever its size. Off leaves reading, forwarding and journalling exactly
+    # as they were - nothing downstream depends on a match yet, and the result
+    # goes into the record rather than into the form the desk receives.
+    MATCHING_ENABLED: bool = True
+
+    # --- Database ------------------------------------------------------------
+    # One folder per email, holding what arrived and what we did with it: the
+    # message as JSON, its body as text, the attachments exactly as they came,
+    # and the form we filled. This is what the front end reads - the journal
+    # beside it stays append-only and is for reading a run, not for serving a
+    # page.
+    #
+    # It holds real customer mail and real customer files, so it is not in git.
+    DATABASE_ENABLED: bool = True
+    DATABASE_PATH: Path = Path("Database")
+    # Keep the attachments' bytes, not only their names. Off leaves the record
+    # and saves the disk - the names, sizes and types are on the record either
+    # way. Only files the pipeline downloaded anyway are ever written: an email
+    # the cheap rules answered is never downloaded, and the record says so.
+    DATABASE_KEEP_ATTACHMENTS: bool = True
+
     # --- Decision log --------------------------------------------------------
     PERSIST_DECISIONS: bool = True
     DECISIONS_LOG_PATH: Path = Path("data/decisions.jsonl")

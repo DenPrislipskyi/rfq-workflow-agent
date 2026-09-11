@@ -1,21 +1,33 @@
 """What happens to an email once it has been fetched from the mailbox."""
 
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from html import escape
+from typing import Any
 
 from src.core.logging import also_the_decision, for_one_email, tally
 from src.domain.enums import DeliveryOutcome, RecommendedAction
 from src.domain.models import ClassificationOutcome, NormalizedEmail
+from src.domain.rules.catalog import Catalog
 from src.domain.rules.regions import RegionMatch, resolve_region
 from src.domain.rules.registries import Registries
-from src.infrastructure.documents import Budget, Document, DocumentLoader, SourceFile
+from src.infrastructure.documents import Budget, DocumentLoader, SourceFile
 from src.infrastructure.outlook.mailbox import Mailbox, OutgoingFile
 from src.infrastructure.outlook.mapping import to_normalized_email
 from src.infrastructure.outlook.schemas import Attachment, EmailMessage
 from src.infrastructure.storage.decisions import DecisionLog
+from src.infrastructure.storage.records import (
+    EmailRecords,
+    RecordedDelivery,
+    RecordedCandidate,
+    RecordedExtraction,
+    RecordedMatch,
+)
 from src.services.extraction import ExtractionPipeline, ReadDocument, RfqExtraction
-from src.services.triage import EmailTriage
+from src.services.extraction.models import LineItem
+from src.services.matching import MatchedLine, MatchingPipeline
+from src.services.triage import EmailTriage, TriagedEmail
 from src.services.workbook import CONTENT_TYPE, FilledWorkbook, WorkbookBuilder
 
 logger = logging.getLogger(__name__)
@@ -56,6 +68,19 @@ MAX_NAMES_LOGGED = 5
 
 
 @dataclass(frozen=True, slots=True)
+class Read:
+    """What came out of an RFQ.
+
+    The rows and the form are separated because they are wanted at different
+    moments: the form goes with the forward, and the rows are matched against
+    the catalogue afterwards, once the desk already has its email.
+    """
+
+    items: list[LineItem] = field(default_factory=list)
+    workbook: FilledWorkbook | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Delivery:
     """Where an RFQ went, and by which rule it was routed there."""
 
@@ -87,6 +112,9 @@ class ClassifyingEmailHandler:
         extraction: ExtractionPipeline | None = None,
         workbooks: WorkbookBuilder | None = None,
         budget: Budget | None = None,
+        records: EmailRecords | None = None,
+        matching: MatchingPipeline | None = None,
+        catalog: Callable[[], Catalog] | None = None,
     ) -> None:
         self._triage = triage
         self._mailbox = mailbox
@@ -105,6 +133,15 @@ class ClassifyingEmailHandler:
         # None again when the master template could not be loaded. The RFQ is
         # still read and journalled; there is simply no file at the end of it.
         self._workbooks = workbooks
+        # The folder the front end reads. A disabled store rather than None, so
+        # that nothing below has to ask whether recording is on.
+        self._records = records or EmailRecords.disabled()
+        # None when matching is switched off: the RFQ is read and forwarded
+        # exactly as before, and no line is looked up in the catalogue.
+        self._matching = matching
+        # Asked for at the moment it is needed rather than held, because the
+        # catalogue is replaced wholesale every time the sheet is re-read.
+        self._catalog = catalog or _no_catalog
         self._loader = DocumentLoader(budget)
 
     async def handle(self, message: EmailMessage) -> None:
@@ -144,28 +181,36 @@ class ClassifyingEmailHandler:
                 email.sender.address if email.sender else "unknown sender",
                 _attached(message),
             )
-            files = await self._read(message, email)
+            # Downloaded once and used three times: by the reader before the
+            # verdict, by the extraction after it, and by the record, which
+            # keeps the customer's files beside the email they came with.
+            arrived, files = await self._read(message, email)
 
             try:
                 triaged = await self._triage.run(email, source="outlook", files=files)
-            except Exception:
-                # No decision id yet - the classification is what failed.
+            except Exception as error:
+                # No decision id yet - the classification is what failed. The
+                # email is still recorded: one that breaks the agent is the one
+                # somebody most needs to look at.
                 await self._label(message.id, self._categories.for_failure())
+                await self._record_failure(email, arrived, error)
                 raise
 
             also_the_decision(triaged.decision_id)
             outcome = triaged.outcome
             labels = self._categories.for_result(outcome.result)
             delivery = None
-            workbook = None
+            read = Read()
 
             if outcome.result.recommended_action is RecommendedAction.FORWARD_TO_DST:
                 match = self._region(email, outcome)
-                workbook = await self._extract(
-                    message, email, outcome, match, triaged.decision_id, files
-                )
+                if self._reads_them_later(message, files, arrived):
+                    # The verdict was taken without opening the files. It is an
+                    # RFQ all the same, so this is where they are fetched.
+                    arrived = await self._download(message)
+                read = await self._extract(email, outcome, match, triaged, arrived, files)
                 delivery = await self._deliver(
-                    message.id, match, triaged.decision_id, outcome, workbook
+                    message.id, match, triaged.decision_id, outcome, read.workbook
                 )
                 if delivery.outcome in UNDELIVERED:
                     labels = self._categories.plus_not_sent(labels)
@@ -174,6 +219,23 @@ class ClassifyingEmailHandler:
 
             if delivery is not None:
                 await self._journal(triaged.decision_id, delivery, labels, labelled)
+
+            workbook = read.workbook
+            await self._records.update(
+                triaged.record_id,
+                # None leaves what the record already says about the files -
+                # their names, and that they were never downloaded.
+                files=arrived or None,
+                labels=labels,
+                labelled=labelled,
+                delivery=_recorded_delivery(delivery),
+                form=(workbook.filename, workbook.data) if workbook else None,
+            )
+
+            # Last, and after the forward on purpose: the desk already has its
+            # email by now, and nothing here goes into it. Two model calls that
+            # nobody is waiting on belong behind the one delivery that matters.
+            await self._match(triaged.record_id, read.items)
 
             # The line a whole run is read by: `grep Done` gives one row per
             # email, saying what it was taken for, what came out of it, where
@@ -191,52 +253,81 @@ class ClassifyingEmailHandler:
                 spent,
             )
 
+    def _reads_them_later(
+        self,
+        message: EmailMessage,
+        files: list[ReadDocument] | None,
+        arrived: list[SourceFile],
+    ) -> bool:
+        """Whether an RFQ's files still have to be fetched at this point.
+
+        True in one case only: there is a reader, the email carries files, and
+        nothing was downloaded before the verdict - which is what
+        `TRIAGE_READS_ATTACHMENTS=false` means, and what the fast path leaves
+        behind when the rules answer an email that turns out to be an RFQ.
+        With Phase 2 off there is nothing to read them with, and Phase 1 must
+        not spend a single request on an attachment.
+        """
+        return (
+            self._extraction is not None
+            and files is None
+            and not arrived
+            and bool(message.attachments)
+        )
+
     async def _read(
         self, message: EmailMessage, email: NormalizedEmail
-    ) -> list[ReadDocument] | None:
-        """Every attachment, read, before the verdict - or None for "not read".
+    ) -> tuple[list[SourceFile], list[ReadDocument] | None]:
+        """The attachments as they arrived, and as the readers saw them.
 
-        None on four counts: the switch is off, Phase 2 is off and there is no
-        reader, the email has no files, or the hard rules have already answered
-        it and nothing may be spent on it. Then the classifier works from the
-        message alone, and the journal line says `null` rather than `[]` - the
-        log above says which of the four it was.
+        The second is None on four counts: the switch is off, Phase 2 is off
+        and there is no reader, the email has no files, or the hard rules have
+        already answered it and nothing may be spent on it. Then the classifier
+        works from the message alone, and the journal line says `null` rather
+        than `[]` - the log above says which of the four it was.
+
+        The first is empty whenever nothing was downloaded, which is the same
+        four counts: an email the rules answer costs no requests and no bytes,
+        and the record says as much beside each file's name.
 
         Never raises. Graph refusing a download is a reason to classify on the
         text, not a reason to drop the email - `_extract` will try again and
         report what it found on its own line. Whatever else fails in here fails
         again inside `run` below, where it is labelled and re-raised.
         """
-        if not self._reads_attachments or self._extraction is None:
-            return None
+        reader = self._extraction
+        if not self._reads_attachments or reader is None:
+            return [], None
         if not message.attachments:
-            return None
+            return [], None
 
+        arrived: list[SourceFile] = []
         try:
             if not self._triage.needs_the_model(email):
                 logger.debug("The rules answer this one, so its files are left alone")
-                return None
-            files = await self._extraction.read(await self._parse(message))
+                return [], None
+            arrived = await self._download(message)
+            files = await reader.read(self._loader.load(arrived))
         except Exception:
             logger.exception("Could not read the files before triage")
-            return None
+            return arrived, None
 
         logger.info(
             "Read %d file(s) before triage: %s",
             len(files),
             [f"{found.origin}={found.role.value}" for found in files],
         )
-        return files
+        return arrived, files
 
     async def _extract(
         self,
-        message: EmailMessage,
         email: NormalizedEmail,
         outcome: ClassificationOutcome,
         match: RegionMatch | None,
-        decision_id: str | None,
+        triaged: TriagedEmail,
+        arrived: list[SourceFile],
         files: list[ReadDocument] | None = None,
-    ) -> FilledWorkbook | None:
+    ) -> Read:
         """Read the RFQ, fill a copy of the template, and journal both.
 
         Returns the file, because the forward carries it. Runs before the
@@ -246,11 +337,11 @@ class ClassifyingEmailHandler:
 
         `files` is the reading the verdict was taken from, reused as it stands -
         a second reading would be N model calls spent on an answer already in
-        hand. None means nothing was read before triage, and then this is where
-        the files are fetched and read.
+        hand. None means nothing was read before triage, and then `arrived` is
+        parsed and read here.
         """
         if self._extraction is None:
-            return None
+            return Read()
 
         branch = match.region.template_branch if match else None
 
@@ -258,14 +349,14 @@ class ClassifyingEmailHandler:
             read = (
                 files
                 if files is not None
-                else await self._extraction.read(await self._parse(message))
+                else await self._extraction.read(self._loader.load(arrived))
             )
             extracted = await self._extraction.run(
                 email, read, signals=outcome.hints.signals
             )
         except Exception:
             logger.exception("Could not read this RFQ")
-            return None
+            return Read()
 
         payload = extracted.journal_payload()
         # What the models cost, added by the handler for the same reason the
@@ -281,12 +372,17 @@ class ClassifyingEmailHandler:
                 "ms": spent.ms,
             }
 
-        workbook = await self._fill(extracted, email, branch, decision_id)
+        workbook = await self._fill(extracted, email, branch, triaged.decision_id)
         if workbook is not None:
             payload["workbook"] = workbook.journal_payload()
 
-        await self._decisions.record_extraction(decision_id=decision_id, payload=payload)
-        return workbook
+        await self._decisions.record_extraction(
+            decision_id=triaged.decision_id, payload=payload
+        )
+        await self._records.update(
+            triaged.record_id, extraction=_recorded_extraction(payload)
+        )
+        return Read(items=list(extracted.items), workbook=workbook)
 
     async def _fill(
         self,
@@ -315,10 +411,6 @@ class ClassifyingEmailHandler:
         except Exception:
             logger.exception("Could not fill the template")
             return None
-
-    async def _parse(self, message: EmailMessage) -> list[Document]:
-        """The attachments as text, tables and images. No model, no decisions."""
-        return self._loader.load(await self._download(message))
 
     async def _download(self, message: EmailMessage) -> list[SourceFile]:
         """The attachments' bytes, one request each.
@@ -478,6 +570,45 @@ class ClassifyingEmailHandler:
             attached=delivery.attached,
         )
 
+    async def _match(self, record_id: str | None, items: Sequence[LineItem]) -> None:
+        """Match each line against our own product list, and record what happened.
+
+        Never raises and never blocks anything: matching is the newest thing in
+        this pipeline and the only one whose output nobody has been promised
+        yet. An RFQ that could not be matched is still an RFQ that was read,
+        forwarded and journalled.
+        """
+        if self._matching is None or not items:
+            return
+
+        try:
+            matched = await self._matching.run(items, self._catalog())
+        except Exception:
+            logger.exception("Could not match this RFQ against the catalogue")
+            return
+
+        await self._records.update(record_id, matching=[_recorded_match(one) for one in matched])
+
+    async def _record_failure(
+        self, email: NormalizedEmail, arrived: list[SourceFile], error: Exception
+    ) -> None:
+        """Record an email the pipeline could not classify.
+
+        There is no verdict and no journal line to point at - classification is
+        what failed - so the record carries the message, whatever files had
+        already arrived, and the error itself. The page then shows the email
+        under the same label the mailbox got, rather than not showing it at all.
+        """
+        record_id = await self._records.open(
+            email=email, outcome=None, decision_id=None, source="outlook"
+        )
+        await self._records.update(
+            record_id,
+            files=arrived or None,
+            labels=self._categories.for_failure(),
+            error=f"{type(error).__name__}: {error}",
+        )
+
     async def _label(self, message_id: str, names: list[str]) -> bool:
         """Stamp the message, and say whether it took.
 
@@ -500,6 +631,72 @@ class ClassifyingEmailHandler:
             )
             return False
         return True
+
+
+def _no_catalog() -> Catalog:
+    """What the handler matches against when nobody gave it a catalogue."""
+    return Catalog([])
+
+
+def _recorded_match(line: MatchedLine) -> RecordedMatch:
+    """One matched line, as the record keeps it.
+
+    The product goes in whole - every column of the sheet's row - because the
+    record is what somebody reads a week later, and which columns matter then
+    is not a decision to make now.
+    """
+    return RecordedMatch(
+        index=line.index,
+        verbatim=line.verbatim,
+        description=line.description,
+        customer_code=line.customer_code,
+        quantity=line.quantity,
+        uom=line.uom,
+        item_code=line.item_code,
+        item_description=line.item.description if line.item else "",
+        confidence=line.confidence,
+        item=dict(line.item.fields) if line.item else {},
+        how=line.how,
+        why=line.why,
+        candidates=[
+            RecordedCandidate(
+                item_code=scored.item.code,
+                description=scored.item.description,
+                confidence=scored.confidence,
+            )
+            for scored in line.candidates
+        ],
+    )
+
+
+def _recorded_delivery(delivery: Delivery | None) -> RecordedDelivery | None:
+    """The delivery as the record keeps it: where it went, or why it did not."""
+    if delivery is None:
+        return None
+    return RecordedDelivery(
+        outcome=delivery.outcome.value,
+        forwarded_to=delivery.forwarded_to,
+        cc=list(delivery.cc),
+        region=delivery.region,
+        region_rule=delivery.region_rule,
+        attached=delivery.attached,
+    )
+
+
+def _recorded_extraction(payload: dict[str, Any]) -> RecordedExtraction:
+    """What the record keeps of a reading: how much came out, and what did not.
+
+    Read off the journal payload rather than off the extraction a second time,
+    so that the two can never disagree about the same email.
+    """
+    items = payload.get("items") or {}
+    return RecordedExtraction(
+        items=int(items.get("count", 0)),
+        complete=bool(payload.get("complete")),
+        missing_required=list(payload.get("missing_required") or []),
+        warnings=list(payload.get("warnings") or []),
+        header=dict(payload.get("header") or {}),
+    )
 
 
 def _filled(workbook: FilledWorkbook | None) -> str:

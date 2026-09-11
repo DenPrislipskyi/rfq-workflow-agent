@@ -321,6 +321,9 @@ local.py
 
 # Real customer emails and decision log - never commit
 data/
+# One folder per email: the customer's own message, their attachments and the
+# form we filled from them. The most sensitive folder in the repository.
+Database/
 .DS_Store
 
 # Real customer emails. Reversible default: delete this line if the team decides

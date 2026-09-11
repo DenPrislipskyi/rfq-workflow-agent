@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from src.domain.models import ClassificationOutcome, NormalizedEmail
 from src.infrastructure.llm.client import LLM
 from src.infrastructure.storage.decisions import DecisionLog
+from src.infrastructure.storage.records import EmailRecords
 from src.services.classification.pipeline import ClassificationPipeline
 from src.services.extraction.models import ReadDocument
 
@@ -20,10 +21,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class TriagedEmail:
-    """The verdict, plus the id of the journal line it was written to."""
+    """The verdict, plus where it was written down.
+
+    Two places, because they answer different questions: `decision_id` names
+    the journal line - how this answer was reached - and `record_id` names the
+    folder under `Database/` that holds the email itself and everything that
+    happens to it afterwards.
+    """
 
     outcome: ClassificationOutcome
     decision_id: str | None
+    record_id: str | None = None
 
 
 class EmailTriage:
@@ -34,10 +42,15 @@ class EmailTriage:
         pipeline: ClassificationPipeline,
         decisions: DecisionLog,
         prompt_version: str,
+        records: EmailRecords | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._decisions = decisions
         self._prompt_version = prompt_version
+        # Every entry point records the email, not just the webhook: an email
+        # pasted into `/classify` is one somebody is looking at, and it should
+        # appear on the page beside the ones the mailbox brought in.
+        self._records = records
 
     def needs_the_model(self, email: NormalizedEmail) -> bool:
         """Whether the verdict on this email will cost a model call.
@@ -75,6 +88,15 @@ class EmailTriage:
             attachments=_seen(files),
         )
 
+        record_id = None
+        if self._records is not None:
+            record_id = await self._records.open(
+                email=email,
+                outcome=outcome,
+                decision_id=decision_id,
+                source=source,
+            )
+
         logger.info(
             "Classified | %s | %s | %s | %.2f | %s | %s files | %s",
             source,
@@ -85,7 +107,9 @@ class EmailTriage:
             len(files) if files is not None else "no",
             decision_id or "not journalled",
         )
-        return TriagedEmail(outcome=outcome, decision_id=decision_id)
+        return TriagedEmail(
+            outcome=outcome, decision_id=decision_id, record_id=record_id
+        )
 
 
 def _seen(files: list[ReadDocument] | None) -> list[dict[str, object]] | None:

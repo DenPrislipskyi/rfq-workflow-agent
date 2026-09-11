@@ -10,17 +10,22 @@ from fastapi import FastAPI
 
 from src.core.config import Settings, get_settings
 from src.domain.rules.registries import Registries
+from src.infrastructure.catalog import PublishedSheet, Snapshot
 from src.infrastructure.excel import Template
 from src.infrastructure.llm.registry import LLMRegistry, ModelSpec
 from src.infrastructure.outlook.auth import GraphTokenProvider
 from src.infrastructure.outlook.client import GraphClient
 from src.infrastructure.outlook.mailbox import Mailbox
 from src.infrastructure.outlook.subscription import SubscriptionManager
+from src.infrastructure.storage.changes import Changes
 from src.infrastructure.storage.decisions import DecisionLog
+from src.infrastructure.storage.records import EmailRecords
 from src.infrastructure.storage.workbooks import WorkbookStore
+from src.services.catalog import CatalogService
 from src.services.classification.pipeline import ClassificationPipeline
 from src.services.extraction import ExtractionPipeline, FileReader, HeaderReader
 from src.services.handlers import ClassifyingEmailHandler
+from src.services.matching import ItemChooser, LineDescriber, MatchingPipeline
 from src.services.notification_service import NotificationService
 from src.services.triage import EmailTriage
 from src.services.workbook import WorkbookBuilder
@@ -35,6 +40,9 @@ class LifespanState(TypedDict):
     llms: LLMRegistry
     notification_service: NotificationService
     subscription_manager: SubscriptionManager
+    records: EmailRecords
+    changes: Changes
+    catalog: CatalogService
 
 
 @asynccontextmanager
@@ -70,15 +78,36 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
         log_bodies=settings.LOG_EMAIL_BODIES,
     )
 
+    # One folder per email, and the only thing the front end reads. Shared the
+    # same way the journal is: triage opens the record, the handler fills in
+    # what became of the email, the HTTP layer reads it back.
+    # The store writes; this says so. Kept apart because they are two jobs:
+    # one owns the folder, the other owns "an open page should look again".
+    changes = Changes()
+    records = EmailRecords(
+        settings.DATABASE_PATH,
+        enabled=settings.DATABASE_ENABLED,
+        keep_attachments=settings.DATABASE_KEEP_ATTACHMENTS,
+        changes=changes,
+    )
+
     triage = EmailTriage(
         pipeline=pipeline,
         decisions=decisions,
         prompt_version=settings.PROMPT_VERSION,
+        records=records,
     )
 
     async with httpx.AsyncClient(
         timeout=settings.HTTP_TIMEOUT_SECONDS
     ) as http_client:
+        # Indexed before anything is served, so the first email of the day is
+        # matched against the last good copy rather than against nothing. The
+        # sheet itself is fetched afterwards, behind the running server.
+        catalog = build_catalog(settings, http_client)
+        catalog.load()
+        matching = build_matching(settings, llms)
+
         graph_client = GraphClient(
             http_client=http_client,
             token_provider=GraphTokenProvider(
@@ -101,6 +130,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
                 reads_attachments=settings.TRIAGE_READS_ATTACHMENTS,
                 extraction=extraction,
                 workbooks=workbooks,
+                records=records,
+                matching=matching,
+                catalog=lambda: catalog.current,
             ),
             client_state=settings.WEBHOOK_CLIENT_STATE,
         )
@@ -112,6 +144,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
             expiration_minutes=settings.SUBSCRIPTION_EXPIRATION_MINUTES,
             renewal_margin_minutes=settings.SUBSCRIPTION_RENEWAL_MARGIN_MINUTES,
         )
+
+        await catalog.start()
 
         if settings.OUTLOOK_ENABLED:
             await subscriptions.start()
@@ -145,10 +179,54 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
                 llms=llms,
                 notification_service=notification_service,
                 subscription_manager=subscriptions,
+                records=records,
+                changes=changes,
+                catalog=catalog,
             )
         finally:
+            await catalog.stop()
             if settings.OUTLOOK_ENABLED:
                 await subscriptions.stop()
+
+
+def build_matching(settings: Settings, llms: LLMRegistry) -> MatchingPipeline | None:
+    """Stage D, or None when it is switched off.
+
+    The text model for both calls: restating a line and choosing between five
+    descriptions are questions about words, and neither of them opens a file.
+    """
+    if not settings.MATCHING_ENABLED:
+        logger.info("MATCHING_ENABLED=false - RFQ lines are not looked up in the catalogue")
+        return None
+
+    return MatchingPipeline(
+        LineDescriber(llms.text),
+        ItemChooser(llms.text),
+        candidates=settings.CATALOG_SHORTLIST,
+    )
+
+
+def build_catalog(settings: Settings, http_client: httpx.AsyncClient) -> CatalogService:
+    """Our product list, from the desk's sheet through a snapshot on disk.
+
+    No sheet id configured is not an error: the snapshot is then the whole
+    story, which is how a machine with no access to the sheet still runs.
+    """
+    sheet = (
+        PublishedSheet(http_client, settings.CATALOG_SHEET_ID, settings.CATALOG_SHEET_GID)
+        if settings.CATALOG_SHEET_ID
+        else None
+    )
+    return CatalogService(
+        sheet,
+        Snapshot(settings.CATALOG_SNAPSHOT_PATH),
+        code_column=settings.CATALOG_CODE_COLUMN,
+        description_column=settings.CATALOG_DESCRIPTION_COLUMN,
+        customer_code_column=settings.CATALOG_CUSTOMER_CODE_COLUMN,
+        customer_description_column=settings.CATALOG_CUSTOMER_DESCRIPTION_COLUMN,
+        index_customer_description=settings.CATALOG_INDEX_CUSTOMER_DESCRIPTION,
+        refresh_minutes=settings.CATALOG_REFRESH_MINUTES,
+    )
 
 
 def build_extraction(settings: Settings, llms: LLMRegistry) -> ExtractionPipeline | None:
