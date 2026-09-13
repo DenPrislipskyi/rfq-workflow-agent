@@ -54,6 +54,11 @@ def fake_settings(**overrides: object) -> Settings:
         # Off for the same reason: a test must never leave a 13 MB workbook in
         # the working tree. The tests that want one point it at `tmp_path`.
         "WORKBOOKS_ENABLED": False,
+        # And off here too, now that the service default is on. Nothing in the
+        # suite reads it - the handler tests pass `forward_enabled` themselves -
+        # but a switch that sends mail to real people does not get to be on by
+        # accident in a test process.
+        "FORWARD_ENABLED": False,
         "LLM_PROVIDER": "fake",
         "LLM_MODEL": "fake-model",
         "LLM_API_KEY": "test-key",

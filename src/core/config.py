@@ -1,8 +1,8 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import SecretStr
+from pydantic import PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -50,10 +50,13 @@ class Settings(BaseSettings):
     LLM_EXTRA_OPTIONS: dict[str, Any] = {}
 
     # --- Forwarding ------------------------------------------------------------
-    # Off by default. This is the first action that sends mail to real people, so
-    # switching it on is a deliberate step taken after watching the labels.
-    # Needs the Mail.Send application permission with admin consent.
-    FORWARD_ENABLED: bool = False
+    # Sending the RFQ on to the desk, which is the job. On by default: an agent
+    # that reads the mailbox and forwards nothing is a half-installed agent, and
+    # every deployment turned this on as its first act anyway.
+    #
+    # Needs the Mail.Send application permission with admin consent. Switch it
+    # off to watch the labels without anything leaving the mailbox.
+    FORWARD_ENABLED: bool = True
 
     # Where each regional desk's RFQs go. Real addresses, so they live here and
     # never in the committed registries file. Adding a desk is one line here,
@@ -142,20 +145,19 @@ class Settings(BaseSettings):
     # Which columns carry the two things a match needs. Matched against the
     # sheet's own headings ignoring case and spacing.
     CATALOG_CODE_COLUMN: str = "Item Code"
-    CATALOG_DESCRIPTION_COLUMN: str = "Item Description"
+    # What the table shows and the record keeps as the product's name. Display
+    # only: it is never searched. `Internal item description` on the matching
+    # screen is this column, and so is `item_description` in the database.
+    CATALOG_SHOWN_COLUMN: str = "Item Description / SSG Description"
     # Optional, and worth setting when the sheet has one: a customer who quotes
     # any code at all usually quotes their own, not ours. It is a second way
     # into the same item, never a second answer - a code and a description are
     # two claims, and the shortlist says when they disagree.
     CATALOG_CUSTOMER_CODE_COLUMN: str = ""
-    # How a customer once asked for the same product. This is the column the
-    # search reads: a line of an RFQ is written by a customer, so what it
-    # resembles is another customer's wording, not our shelf description.
-    CATALOG_CUSTOMER_DESCRIPTION_COLUMN: str = ""
-    # Also index our own product description beside the customer wording. Off:
-    # the desk's specification is that a line is matched against the sheet's
-    # customer wording column, and that column alone.
-    CATALOG_INDEX_ITEM_DESCRIPTION: bool = False
+    # The column the search reads, and the only one it reads. A line of an RFQ
+    # is written by a customer, so what it resembles is how a customer asked
+    # for the same thing before - not our own shelf wording.
+    CATALOG_SEARCH_COLUMN: str = "Customer Description"
     # How many candidates a line of an RFQ is shortlisted down to. This is the
     # ceiling on everything that comes after: a model cannot choose an item it
     # was never shown, so raise it before blaming the model.
@@ -173,6 +175,33 @@ class Settings(BaseSettings):
     # wording before the code that named it is taken at its word. Below it the
     # code is dropped and the catalogue is searched by description instead.
     MATCHING_AGREEMENT_PERCENT: float = 80.0
+
+    # --- Where records and files go -------------------------------------------
+    # The database and a blob container, which is what everything runs on now.
+    #
+    # `folder` is the other implementation - both halves on disk - and it is
+    # kept for one reason: `tests/test_records_contract.py` asks the same
+    # questions of both and compares the answers, which is what caught three
+    # bugs in the database one. Nothing in production sets this.
+    RECORDS_STORE: Literal["postgres", "folder"] = "postgres"
+
+    # The container, and how to reach it. No connection string sends the bytes
+    # to BLOB_FOLDER_PATH instead, so the service runs with no account at all -
+    # which is what the tests do and what a first checkout does.
+    AZURE_STORAGE_CONNECTION_STRING: SecretStr | None = None
+    AZURE_STORAGE_CONTAINER: str = "rfq-files"
+    BLOB_FOLDER_PATH: Path = Path("data/blobs")
+
+    # --- Postgres --------------------------------------------------------------
+    # Where the records go once they leave the folder below. The driver is part
+    # of the URL: `+asyncpg` for the service, and Alembic swaps it for `+psycopg`
+    # because migrations are the one thing here that runs synchronously.
+    DATABASE_URL: PostgresDsn = PostgresDsn(
+        "postgresql+asyncpg://rfq:rfq_local_dev@localhost:5433/rfq"
+    )
+    # Small on purpose: one uvicorn worker handling a webhook at a time does not
+    # need more, and every connection is one the Burstable tier has to hold.
+    DB_POOL_SIZE: int = 5
 
     # --- Database ------------------------------------------------------------
     # One folder per email, holding what arrived and what we did with it: the

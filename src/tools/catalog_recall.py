@@ -133,8 +133,8 @@ def _variants(settings: Settings) -> dict[str, Variant]:
     changes. The middle one replaces our description with the customer's, which
     is the literal reading of "search the Customer Description column".
     """
-    ours = settings.CATALOG_DESCRIPTION_COLUMN
-    theirs = settings.CATALOG_CUSTOMER_DESCRIPTION_COLUMN
+    ours = settings.CATALOG_SHOWN_COLUMN
+    theirs = settings.CATALOG_SEARCH_COLUMN
     variants = {
         "customer wording only": Variant(ours, theirs),
         "our description only": Variant(theirs, ""),
@@ -227,7 +227,7 @@ def _without(
     This is also what happens for real: the product is in the sheet, its past
     wording is in the sheet, and a *new* wording arrives that is not.
     """
-    wording = settings.CATALOG_CUSTOMER_DESCRIPTION_COLUMN
+    wording = settings.CATALOG_SEARCH_COLUMN
     code = settings.CATALOG_CODE_COLUMN
 
     hidden = []
@@ -255,9 +255,9 @@ def cases_of(rows: list[dict[str, str]], settings: Settings) -> list[Case]:
     """
     cases = []
     for row in rows:
-        wording = _real(row.get(settings.CATALOG_CUSTOMER_DESCRIPTION_COLUMN, ""))
+        wording = _real(row.get(settings.CATALOG_SEARCH_COLUMN, ""))
         code = _real(row.get(settings.CATALOG_CODE_COLUMN, ""))
-        description = _real(row.get(settings.CATALOG_DESCRIPTION_COLUMN, ""))
+        description = _real(row.get(settings.CATALOG_SHOWN_COLUMN, ""))
         if wording and code and description and not _is_generic(code, description):
             cases.append(Case(wording=wording, expected_code=code))
     return cases

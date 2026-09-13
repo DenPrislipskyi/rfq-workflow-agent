@@ -40,8 +40,9 @@ from src.domain.models import (
 )
 from src.domain.rules.catalog import Catalog, CatalogItem
 from src.infrastructure.catalog import Snapshot
+from src.core.lifespan import build_records
+from src.infrastructure.storage.changes import Changes
 from src.infrastructure.storage.records import (
-    EmailRecords,
     RecordedCandidate,
     RecordedExtraction,
     RecordedMatch,
@@ -72,15 +73,16 @@ async def main() -> int:
     catalog = Catalog.from_rows(
         Snapshot(settings.CATALOG_SNAPSHOT_PATH).rows(),
         code_column=settings.CATALOG_CODE_COLUMN,
-        description_column=settings.CATALOG_DESCRIPTION_COLUMN,
+        description_column=settings.CATALOG_SHOWN_COLUMN,
         customer_code_column=settings.CATALOG_CUSTOMER_CODE_COLUMN,
-        customer_description_column=settings.CATALOG_CUSTOMER_DESCRIPTION_COLUMN,
+        customer_description_column=settings.CATALOG_SEARCH_COLUMN,
     )
     if not len(catalog):
         logger.error("No catalogue - run `python -m src.tools.sync_catalog` first")
         return 1
 
-    records = EmailRecords(settings.DATABASE_PATH, enabled=True)
+    # Wherever real records go, so the sample shows up on the same screens.
+    records = build_records(settings, Changes())
     matching = _lines(catalog, settings.CATALOG_SHORTLIST)
     if not matching:
         logger.error("The catalogue has no product with a customer wording to sample from")
