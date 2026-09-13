@@ -25,7 +25,7 @@ from src.infrastructure.storage.records import (
     RecordedMatch,
 )
 from src.services.extraction import ExtractionPipeline, ReadDocument, RfqExtraction
-from src.services.extraction.models import LineItem
+from src.services.extraction.models import HeaderField, LineItem
 from src.services.matching import MatchedLine, MatchingPipeline
 from src.services.triage import EmailTriage, TriagedEmail
 from src.services.workbook import CONTENT_TYPE, FilledWorkbook, WorkbookBuilder
@@ -77,6 +77,9 @@ class Read:
     """
 
     items: list[LineItem] = field(default_factory=list)
+    # The desk this RFQ belongs to, resolved once the header has been read.
+    # None when nothing was read, and then the caller keeps its own answer.
+    region: "RegionMatch | None" = None
     workbook: FilledWorkbook | None = None
 
 
@@ -209,6 +212,11 @@ class ClassifyingEmailHandler:
                     # RFQ all the same, so this is where they are fetched.
                     arrived = await self._download(message)
                 read = await self._extract(email, outcome, match, triaged, arrived, files)
+                # The header reading finds a port the triage pass often does
+                # not - it sees the attachments, and it is asked for that one
+                # field rather than for a verdict. It has already run, so
+                # routing on the weaker answer would be a choice, not a cost.
+                match = read.region or match
                 delivery = await self._deliver(
                     message.id, match, triaged.decision_id, outcome, read.workbook
                 )
@@ -343,8 +351,6 @@ class ClassifyingEmailHandler:
         if self._extraction is None:
             return Read()
 
-        branch = match.region.template_branch if match else None
-
         try:
             read = (
                 files
@@ -357,6 +363,14 @@ class ClassifyingEmailHandler:
         except Exception:
             logger.exception("Could not read this RFQ")
             return Read()
+
+        # Now that the header has been read, ask again which desk this is.
+        # The form's branch and the address it is sent to must be the one
+        # answer, so both are taken from here.
+        match = self._region(
+            email, outcome, extracted.header.value(HeaderField.DELIVERY_PORT)
+        ) or match
+        branch = match.region.template_branch if match else None
 
         payload = extracted.journal_payload()
         # What the models cost, added by the handler for the same reason the
@@ -382,7 +396,7 @@ class ClassifyingEmailHandler:
         await self._records.update(
             triaged.record_id, extraction=_recorded_extraction(payload)
         )
-        return Read(items=list(extracted.items), workbook=workbook)
+        return Read(items=list(extracted.items), workbook=workbook, region=match)
 
     async def _fill(
         self,
@@ -535,18 +549,26 @@ class ClassifyingEmailHandler:
         return workbook.filename if workbook else ""
 
     def _region(
-        self, email: NormalizedEmail, outcome: ClassificationOutcome
+        self,
+        email: NormalizedEmail,
+        outcome: ClassificationOutcome,
+        delivery_port: str | None = None,
     ) -> RegionMatch | None:
         """The one desk this email belongs to, or None when it must not be guessed.
 
         Subject and newest message both go in - the region appears in either.
         Quoted history does not: an older message about another port would route
         this one to the wrong desk.
+
+        `delivery_port` is the header reading's answer, when there is one. The
+        triage pass is asked for a verdict and answers about the port in
+        passing; it returned nothing for an email that said "delivery Port
+        Rashid" in its second line, and the RFQ went nowhere.
         """
         return resolve_region(
             self._regions,
             region_hint=email.region_hint,
-            delivery_port=outcome.result.extracted.delivery_port,
+            delivery_port=delivery_port or outcome.result.extracted.delivery_port,
             text=f"{email.subject or ''}\n{outcome.thread.latest_message}",
             mailbox=self._mailbox.address,
         )
@@ -663,6 +685,7 @@ def _recorded_match(line: MatchedLine) -> RecordedMatch:
                 item_code=scored.item.code,
                 description=scored.item.description,
                 confidence=scored.confidence,
+                item=dict(scored.item.fields),
             )
             for scored in line.candidates
         ],

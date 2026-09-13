@@ -97,6 +97,12 @@ regions:
       - khor fakkan
       - khalifa port
       - mina zayed
+      # Ports that were listed above but not here, so an email naming one in
+      # its body and nowhere else had no region at all.
+      - port rashid
+      - mina rashid
+      - al hamriya
+      - port khalid
     mailbox_markers:
       - uae
       - dubai
