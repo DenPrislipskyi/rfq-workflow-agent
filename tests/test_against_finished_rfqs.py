@@ -35,7 +35,7 @@ FORM_PATH = Path("config/rfq_output_template.xlsx")
 CASES = {
     "docs/DANT260189 1 (1).xlsx": (
         datetime(2026, 9, 7, 8, 33, tzinfo=UTC),
-        "Goodwood Ship Management",
+        "Northstar Marine Management",
         {
             HeaderField.VESSEL_NAME: "DHT ANTELOPE",
             HeaderField.IMO: "1055179",

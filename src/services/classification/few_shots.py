@@ -40,10 +40,10 @@ FEW_SHOTS: list[FewShot] = [
             "thread: is_reply=false, quoted_messages=0"
         ),
         metadata=(
-            "from: purchasing@new-company.com\n"
-            "to: OUR COMPANY (UAE) <supply@our-company.com>\n"
+            "from: purchasing@newcompany.example.com\n"
+            "to: OUR COMPANY (UAE) <supply@ourcompany.example.com>\n"
             "subject: VSL: NORTH STAR, QUOTATION: 0015-AB000001C, VENDOR: OUR COMPANY (UAE)\n"
-            "mailbox: supply@our-company.com\n"
+            "mailbox: supply@ourcompany.example.com\n"
             "attachments: E_QUOT_0015-AB000001C_S001-01.pdf; "
             "E_QUOT_XLS_0015-AB000001C_S001-01.XLSX"
         ),
@@ -66,7 +66,7 @@ FEW_SHOTS: list[FewShot] = [
                 "Nothing in the thread precedes it, so this is a first submission."
             ),
             evidence=[
-                "sender domain new-company.com is an external shipping company",
+                "sender domain newcompany.example.com is an external shipping company",
                 "'you may find attached our RFQ for Department \"Engine Materials\"'",
                 "attachment E_QUOT_XLS_0015-AB000001C_S001-01.XLSX is an RFQ form",
                 "'quotation due date is 02/June/2026'",
@@ -85,11 +85,11 @@ FEW_SHOTS: list[FewShot] = [
             "thread: is_reply=false, quoted_messages=0"
         ),
         metadata=(
-            "from: purchasing@new-company.com\n"
-            "to: OUR COMPANY (UAE) <supply@our-company.com>\n"
+            "from: purchasing@newcompany.example.com\n"
+            "to: OUR COMPANY (UAE) <supply@ourcompany.example.com>\n"
             "subject: [Updated]VSL: NORTH STAR, QUOTATION: 0015-AB000001C, "
             "VENDOR: OUR COMPANY (UAE)\n"
-            "mailbox: supply@our-company.com\n"
+            "mailbox: supply@ourcompany.example.com\n"
             "attachments: E_QUOT_0015-AB000001C_S001-01.pdf; "
             "E_QUOT_XLS_0015-AB000001C_S001-01.XLSX"
         ),
@@ -124,7 +124,7 @@ FEW_SHOTS: list[FewShot] = [
             "template_marker_hits: ['own_outbound_quote']\n"
             "thread: is_reply=false, quoted_messages=0"
         ),
-        metadata="from: -\nto: -\nsubject: -\nmailbox: supply@our-company.com\nattachments: -",
+        metadata="from: -\nto: -\nsubject: -\nmailbox: supply@ourcompany.example.com\nattachments: -",
         latest=(
             "Good day Sir/Madam,\n"
             "Many thanks for your RFQ. We are pleased to submit our best offer for your kind "
@@ -138,7 +138,7 @@ FEW_SHOTS: list[FewShot] = [
             "David Clark\n"
             "Customer Service Executive\n"
             "Our Company UAE\n"
-            "david.clark@our-company.com"
+            "david.clark@ourcompany.example.com"
         ),
         answer=LLMClassification(
             category=EmailCategory.OUTBOUND_OWN,
@@ -153,7 +153,7 @@ FEW_SHOTS: list[FewShot] = [
             evidence=[
                 "'We are pleased to submit our best offer'",
                 "signature: David Clark, Our Company UAE",
-                "sender address david.clark@our-company.com in the signature",
+                "sender address david.clark@ourcompany.example.com in the signature",
             ],
         ),
     ),
@@ -166,11 +166,11 @@ FEW_SHOTS: list[FewShot] = [
             "thread: is_reply=true, quoted_messages=1"
         ),
         metadata=(
-            "from: purchasing@new-company.com\n"
-            "to: OUR COMPANY (UAE) <supply@our-company.com>\n"
-            "cc: michael.reed@our-company.com; David.Clark@our-company.com\n"
+            "from: purchasing@newcompany.example.com\n"
+            "to: OUR COMPANY (UAE) <supply@ourcompany.example.com>\n"
+            "cc: michael.reed@ourcompany.example.com; David.Clark@ourcompany.example.com\n"
             "subject: RE: FW: Fw: [Updated]VSL: NORTH STAR, QUOTATION: 0015-AB000001C\n"
-            "mailbox: supply@our-company.com\n"
+            "mailbox: supply@ourcompany.example.com\n"
             "attachments: -"
         ),
         latest=(
@@ -182,7 +182,7 @@ FEW_SHOTS: list[FewShot] = [
             "NEW COMPANY LTD"
         ),
         quoted=(
-            "--- quoted message 1 (from: supply@our-company.com, sent: Jun 16 2026) ---\n"
+            "--- quoted message 1 (from: supply@ourcompany.example.com, sent: Jun 16 2026) ---\n"
             "Many thanks for your RFQ. We are pleased to submit our best offer for your kind "
             "perusal. Item 12: Isopropyl Alcohol 99.9%, 25 LTR can ..."
         ),
@@ -211,10 +211,10 @@ FEW_SHOTS: list[FewShot] = [
             "thread: is_reply=false, quoted_messages=0"
         ),
         metadata=(
-            "from: sales@technical-company.com\n"
-            "to: John Baker <john.baker@our-company.com>\n"
+            "from: sales@technical.example.com\n"
+            "to: John Baker <john.baker@ourcompany.example.com>\n"
             "subject: RE: Enquiry - Iso Propyl Alcohol\n"
-            "mailbox: supply@our-company.com\n"
+            "mailbox: supply@ourcompany.example.com\n"
             "attachments: -"
         ),
         latest=(
@@ -256,17 +256,17 @@ FEW_SHOTS: list[FewShot] = [
             "thread: is_reply=false, quoted_messages=0"
         ),
         metadata=(
-            "from: noreply@econnect.mariapps.com\n"
-            "to: supply@our-company.com\n"
+            "from: noreply@econnect.example.com\n"
+            "to: supply@ourcompany.example.com\n"
             "subject: RFQ Received - BH/O-0001/RFQ26, Old Company Shipping Limited, "
             "Blue Horizon\n"
-            "mailbox: supply@our-company.com\n"
+            "mailbox: supply@ourcompany.example.com\n"
             "attachments: -"
         ),
         latest=(
             "*This is an auto-generated email. Please do not reply to this notification.\n"
             "You are requested to send Quotation for the below RFQ. Click "
-            "https://econnect.mariapps.com/ to login the PAL-eConnect portal.\n"
+            "https://econnect.example.com/ to login the PAL-eConnect portal.\n"
             "Vessel Name: Blue Horizon\n"
             "RFQ No: BH/O-0001/RFQ26\n"
             "RFQ Title: Cabin (Refrigerator)\n"
@@ -301,11 +301,11 @@ FEW_SHOTS: list[FewShot] = [
             "thread: is_reply=false, quoted_messages=0"
         ),
         metadata=(
-            "from: notifications@shipserv.com\n"
-            "to: supply@our-company.com\n"
+            "from: notifications@shipserv.example.com\n"
+            "to: supply@ourcompany.example.com\n"
             "subject: Submitted Quote: 1.11.00001.0.0 - MSC Shipmanagement Ltd. for vessel "
             "Sea Voyager\n"
-            "mailbox: supply@our-company.com\n"
+            "mailbox: supply@ourcompany.example.com\n"
             "attachments: -"
         ),
         latest=(
@@ -343,7 +343,7 @@ FEW_SHOTS: list[FewShot] = [
             "recipients_are_internal_only: false\n"
             "thread: is_reply=true, quoted_messages=2"
         ),
-        metadata="from: -\nto: -\nsubject: -\nmailbox: supply@our-company.com\nattachments: -",
+        metadata="from: -\nto: -\nsubject: -\nmailbox: supply@ourcompany.example.com\nattachments: -",
         latest=(
             "Dear Michael,\n"
             "Prices has been submitted in the CUSTOMER PORTAL.\n"
@@ -351,10 +351,10 @@ FEW_SHOTS: list[FewShot] = [
             "Robert Hall\n"
             "Customer Service Executive\n"
             "Our Company UAE\n"
-            "robert.hall@our-company.com"
+            "robert.hall@ourcompany.example.com"
         ),
         quoted=(
-            "--- quoted message 1 (from: michael.reed@our-company.com, sent: 27 February 2026) "
+            "--- quoted message 1 (from: michael.reed@ourcompany.example.com, sent: 27 February 2026) "
             "---\nKINDLY UPLOAD WITH DATASHEET\n"
             "Subject: FW: RFQ Received - BH/O-0001/RFQ26, Old Company Shipping Limited"
         ),
@@ -370,7 +370,7 @@ FEW_SHOTS: list[FewShot] = [
             ),
             evidence=[
                 "'Prices has been submitted in the CUSTOMER PORTAL'",
-                "signature Robert Hall, Our Company UAE, robert.hall@our-company.com",
+                "signature Robert Hall, Our Company UAE, robert.hall@ourcompany.example.com",
                 "addressed to Eric, a chandler colleague",
             ],
         ),
@@ -385,10 +385,10 @@ FEW_SHOTS: list[FewShot] = [
             "thread: is_reply=false, quoted_messages=0"
         ),
         metadata=(
-            "from: procurement@old-company.com\n"
-            "to: supply@our-company.com\n"
+            "from: procurement@oldcompany.example.com\n"
+            "to: supply@ourcompany.example.com\n"
             "subject: M/T BLUE HORIZON AT FUJAIRAH - URGENT\n"
-            "mailbox: supply@our-company.com\n"
+            "mailbox: supply@ourcompany.example.com\n"
             "attachments: -"
         ),
         latest=(
@@ -430,11 +430,11 @@ FEW_SHOTS: list[FewShot] = [
             "thread: is_reply=true, quoted_messages=1"
         ),
         metadata=(
-            "from: john.davis@some-company.com\n"
-            "to: Our Company Ship Supply - UAE <supply@our-company.com>\n"
+            "from: john.davis@somecompany.example.com\n"
+            "to: Our Company Ship Supply - UAE <supply@ourcompany.example.com>\n"
             'subject: FW: VARIANCE IN: Quote 1.11.00001.0.0 for RFQ \'10000001\' vessel '
             "'Sea Voyager'\n"
-            "mailbox: supply@our-company.com\n"
+            "mailbox: supply@ourcompany.example.com\n"
             "attachments: -"
         ),
         latest=(
@@ -450,7 +450,7 @@ FEW_SHOTS: list[FewShot] = [
             "UNQUOTE"
         ),
         quoted=(
-            "--- quoted message 1 (from: supply@our-company.com, sent: Jun 2026) ---\n"
+            "--- quoted message 1 (from: supply@ourcompany.example.com, sent: Jun 2026) ---\n"
             "VARIANCE IN: Quote 1.11.00001.0.0 from Our Company Shipchandlers for RFQ '10000001'"
         ),
         answer=LLMClassification(

@@ -43,8 +43,8 @@ BODY = "Dear Sir/Madam, you may find attached our RFQ for Engine Materials."
 def email() -> NormalizedEmail:
     return NormalizedEmail(
         message_id="AAMkAGI2",
-        mailbox="supply@our-company.com",
-        sender=EmailAddress(name="Purchasing", address="purchasing@new-company.com"),
+        mailbox="supply@ourcompany.example.com",
+        sender=EmailAddress(name="Purchasing", address="purchasing@newcompany.example.com"),
         subject="VSL: NORTH STAR",
         body_text=BODY,
         attachments=[Attachment(filename="Requisition.xlsx", size_bytes=2048)],
@@ -92,7 +92,7 @@ async def test_a_record_is_one_folder_with_the_email_in_it(tmp_path: Path):
     assert (folder / "body.txt").read_text(encoding="utf-8") == BODY
     written = json.loads((folder / "email.json").read_text(encoding="utf-8"))
     assert written["subject"] == "VSL: NORTH STAR"
-    assert written["sender"]["address"] == "purchasing@new-company.com"
+    assert written["sender"]["address"] == "purchasing@newcompany.example.com"
     assert written["verdict"]["category"] == "NEW_RFQ"
 
 
@@ -215,7 +215,7 @@ async def test_what_became_of_the_email_lands_on_the_same_record(tmp_path: Path)
         labelled=True,
         extraction=RecordedExtraction(items=15, complete=False, missing_required=["IMO"]),
         delivery=RecordedDelivery(
-            outcome=DeliveryOutcome.SENT.value, forwarded_to="uae@desk.com", region="uae"
+            outcome=DeliveryOutcome.SENT.value, forwarded_to="uae-desk@example.invalid", region="uae"
         ),
         form=("KASS_RFQ_NORTH_STAR.xlsx", b"PK\x03\x04 workbook"),
     )
@@ -224,7 +224,7 @@ async def test_what_became_of_the_email_lands_on_the_same_record(tmp_path: Path)
     assert record is not None
     assert record.labels == ["SSG RFQ"] and record.labelled is True
     assert record.extraction is not None and record.extraction.items == 15
-    assert record.delivery is not None and record.delivery.forwarded_to == "uae@desk.com"
+    assert record.delivery is not None and record.delivery.forwarded_to == "uae-desk@example.invalid"
     assert record.form is not None
     assert record.form.saved_as == "KASS_RFQ_NORTH_STAR.xlsx"
     assert (tmp_path / "Database" / record_id / record.form.saved_as).exists()

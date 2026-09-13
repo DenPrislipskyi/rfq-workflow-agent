@@ -19,7 +19,7 @@ from src.infrastructure.outlook.mailbox import (
     OutgoingFile,
 )
 
-MAILBOX = "supply@our-company.com"
+MAILBOX = "supply@ourcompany.example.com"
 MESSAGE_ID = "AAMkAGNjYzI0NDU4"
 DRAFT_ID = "AAMkDRAFT-1"
 UPLOAD_URL = "https://upload.example.invalid/session?token=abc"

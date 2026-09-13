@@ -23,7 +23,7 @@ from tests.corpus import load_email_by_id
 from tests.fakes import BrokenLLM, FakeLLM, fake_settings
 
 REGISTRIES = Registries.load(
-    Path("config/registries.yaml"), mailbox="supply@our-company.com"
+    Path("config/registries.yaml"), mailbox="supply@ourcompany.example.com"
 )
 
 NEW_RFQ_ANSWER = LLMClassification(
@@ -44,8 +44,8 @@ def pipeline(answer: LLMClassification = NEW_RFQ_ANSWER, **settings) -> tuple:
 
 def email(**overrides) -> NormalizedEmail:
     defaults = {
-        "sender": EmailAddress(address="purchasing@new-company.com"),
-        "to": [EmailAddress(address="supply@our-company.com")],
+        "sender": EmailAddress(address="purchasing@newcompany.example.com"),
+        "to": [EmailAddress(address="supply@ourcompany.example.com")],
         "subject": "VSL: NORTH STAR, QUOTATION: 0015-AB000001C",
         "body_text": "Dear Sir/Madam, you may find attached our RFQ for Engine Materials.",
     }
@@ -97,8 +97,8 @@ async def test_a_hard_rule_answers_without_calling_the_model() -> None:
     agent, llm = pipeline()
     outcome = await agent.classify(
         email(
-            sender=EmailAddress(address="robert.hall@our-company.com"),
-            to=[EmailAddress(address="michael.reed@our-company.com")],
+            sender=EmailAddress(address="robert.hall@ourcompany.example.com"),
+            to=[EmailAddress(address="michael.reed@ourcompany.example.com")],
             body_text="Prices has been submitted in the CUSTOMER PORTAL.",
         )
     )
@@ -113,8 +113,8 @@ async def test_a_rule_decision_carries_no_model_metadata() -> None:
     agent, _ = pipeline()
     outcome = await agent.classify(
         email(
-            sender=EmailAddress(address="robert.hall@our-company.com"),
-            to=[EmailAddress(address="michael.reed@our-company.com")],
+            sender=EmailAddress(address="robert.hall@ourcompany.example.com"),
+            to=[EmailAddress(address="michael.reed@ourcompany.example.com")],
         )
     )
     assert outcome.model is None
@@ -125,8 +125,8 @@ async def test_disabling_the_fast_path_sends_everything_to_the_model() -> None:
     agent, llm = pipeline(FAST_PATH_ENABLED=False)
     await agent.classify(
         email(
-            sender=EmailAddress(address="robert.hall@our-company.com"),
-            to=[EmailAddress(address="michael.reed@our-company.com")],
+            sender=EmailAddress(address="robert.hall@ourcompany.example.com"),
+            to=[EmailAddress(address="michael.reed@ourcompany.example.com")],
         )
     )
     assert len(llm.calls) == 1
@@ -368,8 +368,8 @@ def test_an_email_the_rules_answer_does_not() -> None:
     is a rule that costs no request at all."""
     agent, _ = pipeline()
     internal = email(
-        sender=EmailAddress(address="robert.hall@our-company.com"),
-        to=[EmailAddress(address="michael.reed@our-company.com")],
+        sender=EmailAddress(address="robert.hall@ourcompany.example.com"),
+        to=[EmailAddress(address="michael.reed@ourcompany.example.com")],
     )
     assert agent.needs_the_model(internal) is False
 
@@ -377,8 +377,8 @@ def test_an_email_the_rules_answer_does_not() -> None:
 def test_switching_the_rules_off_means_every_email_needs_the_model() -> None:
     agent, _ = pipeline(FAST_PATH_ENABLED=False)
     internal = email(
-        sender=EmailAddress(address="robert.hall@our-company.com"),
-        to=[EmailAddress(address="michael.reed@our-company.com")],
+        sender=EmailAddress(address="robert.hall@ourcompany.example.com"),
+        to=[EmailAddress(address="michael.reed@ourcompany.example.com")],
     )
     assert agent.needs_the_model(internal) is True
 
@@ -389,8 +389,8 @@ async def test_the_rules_answer_the_same_whatever_the_files_held() -> None:
     agent, llm = pipeline()
     outcome = await agent.classify(
         email(
-            sender=EmailAddress(address="robert.hall@our-company.com"),
-            to=[EmailAddress(address="michael.reed@our-company.com")],
+            sender=EmailAddress(address="robert.hall@ourcompany.example.com"),
+            to=[EmailAddress(address="michael.reed@ourcompany.example.com")],
         ),
         files=[read_file(items=15)],
     )

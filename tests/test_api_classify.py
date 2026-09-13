@@ -27,7 +27,7 @@ from tests.corpus import load_email_by_id
 from tests.fakes import BrokenLLM, FakeLLM, fake_settings
 
 REGISTRIES = Registries.load(
-    Path("config/registries.yaml"), mailbox="supply@our-company.com"
+    Path("config/registries.yaml"), mailbox="supply@ourcompany.example.com"
 )
 URL = "/api/v1/emails/classify"
 
@@ -77,10 +77,10 @@ def _registry(llm) -> LLMRegistry:
 
 STRUCTURED = {
     "message_id": "AAMkAGI2",
-    "mailbox": "supply@our-company.com",
+    "mailbox": "supply@ourcompany.example.com",
     "region_hint": "UAE",
-    "sender": {"name": "NEW COMPANY", "address": "purchasing@new-company.com"},
-    "to": [{"address": "supply@our-company.com"}],
+    "sender": {"name": "NEW COMPANY", "address": "purchasing@newcompany.example.com"},
+    "to": [{"address": "supply@ourcompany.example.com"}],
     "subject": "VSL: NORTH STAR, QUOTATION: 0015-AB000001C",
     "body_text": "Dear Sir/Madam, you may find attached our RFQ. Quotation due date is 02/June/2026.",
     "attachments": [{"filename": "E_QUOT_XLS_0015.XLSX", "size_bytes": 40311}],
@@ -187,8 +187,8 @@ def test_model_failures_map_to_their_own_status(name: str, error, expected: int)
 
 def test_a_rule_decision_reports_no_model_in_meta() -> None:
     internal = {
-        "sender": {"address": "robert.hall@our-company.com"},
-        "to": [{"address": "michael.reed@our-company.com"}],
+        "sender": {"address": "robert.hall@ourcompany.example.com"},
+        "to": [{"address": "michael.reed@ourcompany.example.com"}],
         "subject": "RFQ inserted",
         "body_text": "Prices has been submitted in the CUSTOMER PORTAL.",
     }

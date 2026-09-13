@@ -25,8 +25,8 @@ def test_header_block_is_parsed_and_removed() -> None:
     raw = (
         "CAUTION: External Sender. Do not click links.\n"
         "Message Number: 1456098\n"
-        "From: purchasing@new-company.com\n"
-        "To: OUR COMPANY (UAE) (supply@our-company.com)\n"
+        "From: purchasing@newcompany.example.com\n"
+        "To: OUR COMPANY (UAE) (supply@ourcompany.example.com)\n"
         "Sent: Tuesday, May 26, 2026 11:30 (UTC +03:00)\n"
         "Subject: VSL: NORTH STAR\n"
         "Dear Sir/Madam\n"
@@ -34,7 +34,7 @@ def test_header_block_is_parsed_and_removed() -> None:
     )
     headers, body = split_headers(raw)
 
-    assert headers["from"] == "purchasing@new-company.com"
+    assert headers["from"] == "purchasing@newcompany.example.com"
     assert headers["subject"] == "VSL: NORTH STAR"
     assert headers["message number"] == "1456098"
     assert body.startswith("Dear Sir/Madam")

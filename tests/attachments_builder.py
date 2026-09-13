@@ -132,7 +132,7 @@ def zip_of(files: dict[str, bytes]) -> bytes:
 
 def eml_with_attachment(payload: bytes, filename: str) -> bytes:
     message = EmailMessage()
-    message["From"] = "purchasing@almiship.com"
+    message["From"] = "purchasing@almi.example.com"
     message["To"] = "rfq@example.com"
     message["Subject"] = "FW: RFQ 78432"
     message.set_content("Original request below, spreadsheet attached.")

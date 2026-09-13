@@ -288,8 +288,8 @@ you would infer from the goods. Cite the file by its name from <sources>.
 owner, as they write their own name. Not the person, not the vessel, not us.
 
 Take it from the signature block, the letterhead, or the sender's own domain -
-whichever spells it out most fully. `purchasing@goodwoodship.com` signed
-"Goodwood Ship Management" is `Goodwood Ship Management`, not `goodwoodship.com`.
+whichever spells it out most fully. `purchasing@northstar-marine.example.com` signed
+"Northstar Marine Management" is `Northstar Marine Management`, not `northstar-marine.example.com`.
 
 Leave it out when the email does not say. It is looked up against a list of
 2,190 companies, so a shortened or invented name finds the wrong one or nothing;

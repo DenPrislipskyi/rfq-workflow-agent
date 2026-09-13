@@ -43,7 +43,7 @@ Purchasing Officer
 """
 
 EMAIL = NormalizedEmail(
-    sender=EmailAddress(name="Nikos Papadopoulos", address="purchasing@almiship.com"),
+    sender=EmailAddress(name="Nikos Papadopoulos", address="purchasing@almi.example.com"),
     subject="RFQ 78432 / MV ALMI GLOBE / Jebel Ali / deck stores",
     body_text=BODY,
     received_at=datetime(2026, 9, 5, 8, 14, tzinfo=UTC),
@@ -291,7 +291,7 @@ def test_the_prompt_carries_the_email_and_who_sent_it():
     text = prompt()
 
     assert "RFQ 78432 / MV ALMI GLOBE" in text
-    assert "purchasing@almiship.com" in text
+    assert "purchasing@almi.example.com" in text
     assert "Nikos Papadopoulos" in text
     assert "2026-09-05T08:14" in text
 

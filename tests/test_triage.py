@@ -25,7 +25,7 @@ from tests.fakes import BrokenLLM, FakeLLM, fake_settings
 
 REGISTRIES = Registries.load(
     Path("config/registries.yaml"),
-    mailbox="supply@our-company.com",
+    mailbox="supply@ourcompany.example.com",
     region_mailboxes={"uae": "uae-desk@example.invalid", "sg": "sg-desk@example.invalid"},
     region_cc={"uae": ["uae-cc@example.invalid", "ops@example.invalid"], "sg": []},
 )
@@ -42,8 +42,8 @@ GRAPH_MESSAGE = EmailMessage.model_validate(
     {
         "id": "AAMkAGNjYzI0NDU4",
         "subject": "VSL: NORTH STAR, QUOTATION: 0015-AB000001C",
-        "from": {"emailAddress": {"address": "purchasing@new-company.com"}},
-        "toRecipients": [{"emailAddress": {"address": "supply@our-company.com"}}],
+        "from": {"emailAddress": {"address": "purchasing@newcompany.example.com"}},
+        "toRecipients": [{"emailAddress": {"address": "supply@ourcompany.example.com"}}],
         "body": {"contentType": "html", "content": "<p>you may find attached our RFQ</p>"},
     }
 )
@@ -71,7 +71,7 @@ class FakeMailbox:
 
     def __init__(
         self,
-        address: str = "supply@our-company.com",
+        address: str = "supply@ourcompany.example.com",
         fails: bool = False,
         forward_fails: bool = False,
     ) -> None:
@@ -124,8 +124,8 @@ def handler(
 
 def http_email() -> NormalizedEmail:
     return NormalizedEmail(
-        sender=EmailAddress(address="purchasing@new-company.com"),
-        to=[EmailAddress(address="supply@our-company.com")],
+        sender=EmailAddress(address="purchasing@newcompany.example.com"),
+        to=[EmailAddress(address="supply@ourcompany.example.com")],
         subject="VSL: NORTH STAR, QUOTATION: 0015-AB000001C",
         body_text="you may find attached our RFQ",
     )
@@ -185,7 +185,7 @@ async def test_the_handler_records_which_mailbox_the_email_came_from(tmp_path: P
 
     await graph_handler.handle(GRAPH_MESSAGE)
 
-    assert next(journal.records())["email"]["mailbox"] == "supply@our-company.com"
+    assert next(journal.records())["email"]["mailbox"] == "supply@ourcompany.example.com"
 
 
 async def test_graph_and_http_reach_the_same_verdict(tmp_path: Path) -> None:
@@ -284,8 +284,8 @@ def graph_message(body: str, *, categories: list[str] | None = None) -> EmailMes
         {
             "id": "AAMkAGNjYzI0NDU4",
             "subject": "VSL: NORTH STAR, QUOTATION: 0015-AB000001C",
-            "from": {"emailAddress": {"address": "purchasing@new-company.com"}},
-            "toRecipients": [{"emailAddress": {"address": "supply@our-company.com"}}],
+            "from": {"emailAddress": {"address": "purchasing@newcompany.example.com"}},
+            "toRecipients": [{"emailAddress": {"address": "supply@ourcompany.example.com"}}],
             "body": {"contentType": "text", "content": body},
             "categories": categories or [],
         }
@@ -425,7 +425,7 @@ async def test_a_region_with_no_address_configured_is_flagged_not_sent(tmp_path:
     """A blank UAE_MAILBOX must stop the mail, not crash and not send nowhere."""
     unconfigured = Registries.load(
         Path("config/registries.yaml"),
-        mailbox="supply@our-company.com",
+        mailbox="supply@ourcompany.example.com",
         region_mailboxes={"sg": "sg-desk@example.invalid"},
     )
     triage, _, _ = build(tmp_path)
@@ -559,7 +559,7 @@ async def test_a_configured_region_with_no_address_is_a_different_outcome(tmp_pa
     """"Nobody set UAE_MAILBOX" and "I cannot tell the region" need different fixes."""
     unconfigured = Registries.load(
         Path("config/registries.yaml"),
-        mailbox="supply@our-company.com",
+        mailbox="supply@ourcompany.example.com",
         region_mailboxes={"sg": "sg-desk@example.invalid"},
     )
     triage, journal, _ = build(tmp_path)

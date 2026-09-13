@@ -88,24 +88,24 @@ def test_an_unparsed_date_is_reported_rather_than_invented() -> None:
 
 
 ADDRESS_STYLES = [
-    ("bare", "purchasing@new-company.com", None, "purchasing@new-company.com"),
+    ("bare", "purchasing@newcompany.example.com", None, "purchasing@newcompany.example.com"),
     (
         "brackets",
-        "OUR COMPANY (UAE) (supply@our-company.com)",
+        "OUR COMPANY (UAE) (supply@ourcompany.example.com)",
         "OUR COMPANY (UAE)",
-        "supply@our-company.com",
+        "supply@ourcompany.example.com",
     ),
     (
         "angles",
-        "Our Company Ship Supply - UAE <supply@our-company.com>",
+        "Our Company Ship Supply - UAE <supply@ourcompany.example.com>",
         "Our Company Ship Supply - UAE",
-        "supply@our-company.com",
+        "supply@ourcompany.example.com",
     ),
     (
         "quoted name",
-        '"NEW COMPANY LTD Purchasing Dept" <purchasing@new-company.com>',
+        '"NEW COMPANY LTD Purchasing Dept" <purchasing@newcompany.example.com>',
         "NEW COMPANY LTD Purchasing Dept",
-        "purchasing@new-company.com",
+        "purchasing@newcompany.example.com",
     ),
 ]
 
@@ -119,8 +119,8 @@ def test_every_address_style_in_the_corpus_parses() -> None:
 
 
 def test_addresses_are_lower_cased_so_registry_lookups_match() -> None:
-    assert parse_addresses("David.Clark@Our-Company.com")[0].address == (
-        "david.clark@our-company.com"
+    assert parse_addresses("David.Clark@ourcompany.example.com")[0].address == (
+        "david.clark@ourcompany.example.com"
     )
 
 

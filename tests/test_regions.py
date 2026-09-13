@@ -43,7 +43,7 @@ def test_a_desk_with_no_address_configured_stays_recognisable() -> None:
     Refusing to forward is the handler's job; dropping the region here would
     quietly turn a conflict into a confident answer.
     """
-    partial = Registries.load(REGISTRIES_PATH, region_mailboxes={"uae": "a@b.com"}).regions
+    partial = Registries.load(REGISTRIES_PATH, region_mailboxes={"uae": "a@example.invalid"}).regions
 
     assert resolve_region(partial, text="eta Singapore").key == "sg"
     assert partial["sg"].forward_to == ""
@@ -51,7 +51,7 @@ def test_a_desk_with_no_address_configured_stays_recognisable() -> None:
 
 def test_an_address_for_an_unknown_region_is_ignored() -> None:
     """A typo in .env must not invent a desk nothing can ever route to."""
-    regions = Registries.load(REGISTRIES_PATH, region_mailboxes={"usa": "a@b.com"}).regions
+    regions = Registries.load(REGISTRIES_PATH, region_mailboxes={"usa": "a@example.invalid"}).regions
     assert set(regions) == {"uae", "sg"}
 
 
@@ -134,14 +134,14 @@ def test_a_keyword_in_the_text_is_enough() -> None:
 
 
 def test_the_mailbox_is_the_last_resort() -> None:
-    match = resolve_region(REGIONS, mailbox="supply.uae@our-company.com")
+    match = resolve_region(REGIONS, mailbox="supply.uae@ourcompany.example.com")
     assert (match.key, match.rule) == ("uae", "mailbox")
 
 
 def test_the_text_overrides_the_mailbox_it_arrived_in() -> None:
     """A Singapore delivery handled by the UAE desk still belongs to Singapore."""
     match = resolve_region(
-        REGIONS, text="please quote for delivery Singapore", mailbox="supply.uae@our-company.com"
+        REGIONS, text="please quote for delivery Singapore", mailbox="supply.uae@ourcompany.example.com"
     )
     assert match.key == "sg"
 
@@ -162,14 +162,14 @@ def test_an_ambiguous_rule_does_not_fall_through_to_a_weaker_one() -> None:
         resolve_region(
             REGIONS,
             text="Dubai stock, Singapore delivery",
-            mailbox="supply.uae@our-company.com",
+            mailbox="supply.uae@ourcompany.example.com",
         )
         is None
     )
 
 
 def test_nothing_recognisable_is_not_a_match() -> None:
-    assert resolve_region(REGIONS, text="please send your best price", mailbox="a@b.com") is None
+    assert resolve_region(REGIONS, text="please send your best price", mailbox="a@example.invalid") is None
 
 
 def test_an_unknown_hint_does_not_route_anywhere() -> None:
@@ -198,12 +198,12 @@ def test_a_marker_ending_in_punctuation_still_matches() -> None:
 
 def test_without_a_table_nothing_is_ever_routed() -> None:
     """Deleting the section from the YAML must disable forwarding, not crash it."""
-    assert resolve_region({}, text="Dubai", mailbox="supply.uae@x.com") is None
+    assert resolve_region({}, text="Dubai", mailbox="supply.uae@example.invalid") is None
 
 
 def test_a_region_needs_no_rules_to_be_valid() -> None:
     """A desk configured with only an address is unreachable, never a crash."""
-    assert resolve_region({"x": Region(forward_to="a@b.com")}, text="anything") is None
+    assert resolve_region({"x": Region(forward_to="a@example.invalid")}, text="anything") is None
 
 
 # --------------------------------------------------------------------------- #

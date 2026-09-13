@@ -35,7 +35,7 @@ from tests.fakes import FakeLLM
 
 
 EMAIL = NormalizedEmail(
-    sender=EmailAddress(name="Nikos Papadopoulos", address="purchasing@almiship.com"),
+    sender=EmailAddress(name="Nikos Papadopoulos", address="purchasing@almi.example.com"),
     subject="RFQ 78432 / MV ALMI GLOBE / Jebel Ali",
     body_text="Kindly quote for MV ALMI GLOBE, IMO 9232395. Delivery Jebel Ali, ETA 12 Oct.",
     received_at=datetime(2026, 9, 5, 8, 14, tzinfo=UTC))

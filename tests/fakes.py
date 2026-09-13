@@ -60,7 +60,7 @@ def fake_settings(**overrides: object) -> Settings:
         "APPLICATION_CLIENT_ID": "client-id",
         "DIRECTORY_TENANT_ID": "tenant-id",
         "CLIENT_SECRET_VALUE": "secret",
-        "MAILBOX_ADDRESS": "supply@our-company.com",
+        "MAILBOX_ADDRESS": "supply@ourcompany.example.com",
         "NGROK_URL": "https://example.invalid",
         "WEBHOOK_CLIENT_STATE": "state",
     }

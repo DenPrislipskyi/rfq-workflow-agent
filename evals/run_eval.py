@@ -1,6 +1,6 @@
 """Run the classifier over the labelled corpus and score it.
 
-    uv run python -m evals.run_eval --mailbox supply@example.com
+    uv run python -m evals.run_eval --mailbox supply@sevenseas.example.com
     uv run python -m evals.run_eval --provider anthropic --model claude-sonnet-5
     uv run python -m evals.run_eval --repeat 3
 
@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mailbox",
-        help="the mailbox the corpus was collected from, e.g. supply@example.com. "
+        help="the mailbox the corpus was collected from, e.g. supply@sevenseas.example.com. "
         "Defaults to MAILBOX_ADDRESS, which is usually a different company - and then "
         "the model cannot tell which sender is 'us', so scores read low for the wrong reason.",
     )

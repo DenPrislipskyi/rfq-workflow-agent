@@ -16,7 +16,7 @@ from src.domain.preprocessing.signals import classify_attachment
 NO_HEADER_BLOCK = "no_header_block"
 DATE_NOT_PARSED = "received_at_not_parsed"
 
-# "OUR COMPANY (supply@our-company.com)" - the corpus puts the address in round
+# "OUR COMPANY (supply@ourcompany.example.com)" - the corpus puts the address in round
 # brackets, which an RFC-aware parser reads as a comment and discards. Rewriting
 # them as angle brackets keeps the address.
 _BRACKETED_ADDRESS = re.compile(r"\(\s*([^()\s]+@[^()\s]+)\s*\)")

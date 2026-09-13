@@ -34,8 +34,8 @@ BODY = "Dear Sir/Madam, you may find attached our RFQ for Engine Materials."
 def email() -> NormalizedEmail:
     return NormalizedEmail(
         message_id="AAMkAGI2",
-        mailbox="supply@our-company.com",
-        sender=EmailAddress(address="purchasing@new-company.com"),
+        mailbox="supply@ourcompany.example.com",
+        sender=EmailAddress(address="purchasing@newcompany.example.com"),
         subject="VSL: NORTH STAR",
         body_text=BODY,
         attachments=[Attachment(filename="E_QUOT_XLS_0015.XLSX")],

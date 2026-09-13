@@ -40,7 +40,7 @@ HEADER: dict[HeaderField, str] = {
     HeaderField.RFQ_REFERENCE: "78432",
     HeaderField.CUSTOMER_CONTACT: "Nikos Papadopoulos",
     HeaderField.CUSTOMER_PHONE: "+30 210 4599 000",
-    HeaderField.CUSTOMER_EMAIL: "purchasing@almiship.com",
+    HeaderField.CUSTOMER_EMAIL: "purchasing@almi.example.com",
     HeaderField.PERSON_DESIGNATION: "Purchasing Officer",
     HeaderField.DELIVERY_PORT: "UAE - JEBEL ALI",
     HeaderField.CURRENCY: "AED",

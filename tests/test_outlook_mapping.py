@@ -12,11 +12,11 @@ GRAPH_PAYLOAD = {
     "id": "AAMkAGNjYzI0NDU4",
     "subject": "[Updated]VSL: NORTH STAR, QUOTATION: 0015-AB000001C",
     "receivedDateTime": "2026-08-26T09:49:21Z",
-    "from": {"emailAddress": {"name": "NEW COMPANY", "address": "purchasing@new-company.com"}},
+    "from": {"emailAddress": {"name": "NEW COMPANY", "address": "purchasing@newcompany.example.com"}},
     "toRecipients": [
-        {"emailAddress": {"name": "OUR COMPANY (UAE)", "address": "supply@our-company.com"}}
+        {"emailAddress": {"name": "OUR COMPANY (UAE)", "address": "supply@ourcompany.example.com"}}
     ],
-    "ccRecipients": [{"emailAddress": {"address": "michael.reed@our-company.com"}}],
+    "ccRecipients": [{"emailAddress": {"address": "michael.reed@ourcompany.example.com"}}],
     "hasAttachments": True,
     "body": {
         "contentType": "html",
@@ -32,14 +32,14 @@ def message(**overrides) -> EmailMessage:
 
 
 def test_every_field_the_classifier_needs_survives_the_mapping() -> None:
-    email = to_normalized_email(message(), mailbox="supply@our-company.com")
+    email = to_normalized_email(message(), mailbox="supply@ourcompany.example.com")
 
     assert email.message_id == "AAMkAGNjYzI0NDU4"
     assert email.subject is not None and email.subject.startswith("[Updated]")
-    assert email.sender is not None and email.sender.address == "purchasing@new-company.com"
-    assert [item.address for item in email.to] == ["supply@our-company.com"]
-    assert [item.address for item in email.cc] == ["michael.reed@our-company.com"]
-    assert email.mailbox == "supply@our-company.com"
+    assert email.sender is not None and email.sender.address == "purchasing@newcompany.example.com"
+    assert [item.address for item in email.to] == ["supply@ourcompany.example.com"]
+    assert [item.address for item in email.cc] == ["michael.reed@ourcompany.example.com"]
+    assert email.mailbox == "supply@ourcompany.example.com"
     assert email.received_at is not None
 
 

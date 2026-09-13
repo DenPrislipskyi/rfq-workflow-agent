@@ -28,14 +28,14 @@ from src.domain.rules.hints import build_hints, render_hints
 from src.domain.rules.registries import Registries
 
 REGISTRIES_PATH = Path("config/registries.yaml")
-MAILBOX = "supply@our-company.com"
+MAILBOX = "supply@ourcompany.example.com"
 REGISTRIES = Registries.load(REGISTRIES_PATH, mailbox=MAILBOX)
 
 
 def email(**overrides) -> NormalizedEmail:
     """A minimal customer email; override only what the test is about."""
     defaults = {
-        "sender": EmailAddress(address="purchasing@new-company.com"),
+        "sender": EmailAddress(address="purchasing@newcompany.example.com"),
         "to": [EmailAddress(address=MAILBOX)],
         "subject": "VSL: NORTH STAR, QUOTATION: 0015-AB000001C",
     }
@@ -53,12 +53,12 @@ def thread(text: str = "Please find attached our RFQ for Engine Materials.") -> 
 
 def test_the_watched_mailbox_domain_becomes_our_own() -> None:
     """Nobody writes it down twice: the address is already in Settings."""
-    assert REGISTRIES.internal_domains == ["our-company.com"]
+    assert REGISTRIES.internal_domains == ["ourcompany.example.com"]
 
 
 def test_a_different_deployment_gets_a_different_domain() -> None:
-    other = Registries.load(REGISTRIES_PATH, mailbox="triage@other-company.com")
-    assert other.internal_domains == ["other-company.com"]
+    other = Registries.load(REGISTRIES_PATH, mailbox="triage@othercompany.example.com")
+    assert other.internal_domains == ["othercompany.example.com"]
 
 
 def test_without_a_mailbox_nobody_is_internal() -> None:
@@ -67,7 +67,7 @@ def test_without_a_mailbox_nobody_is_internal() -> None:
 
 
 def test_domains_are_matched_case_insensitively() -> None:
-    assert REGISTRIES.is_internal_domain("Our-Company.com")
+    assert REGISTRIES.is_internal_domain("ourcompany.example.com")
 
 
 # --------------------------------------------------------------------------- #
@@ -114,9 +114,9 @@ def test_every_label_matches_a_category_that_exists_in_the_mailbox() -> None:
 
 
 SENDERS = [
-    ("michael.reed@our-company.com", SenderClass.INTERNAL_OWN),
-    ("purchasing@new-company.com", SenderClass.EXTERNAL_UNKNOWN),
-    ("sales@technical-company.com", SenderClass.EXTERNAL_UNKNOWN),
+    ("michael.reed@ourcompany.example.com", SenderClass.INTERNAL_OWN),
+    ("purchasing@newcompany.example.com", SenderClass.EXTERNAL_UNKNOWN),
+    ("sales@technical.example.com", SenderClass.EXTERNAL_UNKNOWN),
 ]
 
 
@@ -143,8 +143,8 @@ def test_missing_sender_is_unknown_not_external() -> None:
 def test_r1_internal_conversation() -> None:
     decision = match_fast_path(
         email(
-            sender=EmailAddress(address="robert.hall@our-company.com"),
-            to=[EmailAddress(address="michael.reed@our-company.com")],
+            sender=EmailAddress(address="robert.hall@ourcompany.example.com"),
+            to=[EmailAddress(address="michael.reed@ourcompany.example.com")],
         ),
         thread("The RFQ is inserted in SCINT."),
         REGISTRIES,
@@ -159,10 +159,10 @@ def test_r1_declines_when_one_recipient_is_external() -> None:
     into the same thread. The LLM makes that call, not a rule."""
     decision = match_fast_path(
         email(
-            sender=EmailAddress(address="david.clark@our-company.com"),
+            sender=EmailAddress(address="david.clark@ourcompany.example.com"),
             to=[
-                EmailAddress(address="purchasing@new-company.com"),
-                EmailAddress(address="michael.reed@our-company.com"),
+                EmailAddress(address="purchasing@newcompany.example.com"),
+                EmailAddress(address="michael.reed@ourcompany.example.com"),
             ],
         ),
         thread("Many thanks for your RFQ. We are pleased to submit our best offer."),
@@ -200,8 +200,8 @@ def test_our_own_outgoing_quote_is_left_to_the_model() -> None:
     """A rule used to bin these. It also binned a supplier's live prices, so it went."""
     decision = match_fast_path(
         email(
-            sender=EmailAddress(address="system@our-company.com"),
-            to=[EmailAddress(address="sales@math-company.com")],
+            sender=EmailAddress(address="system@ourcompany.example.com"),
+            to=[EmailAddress(address="sales@mathworks.example.com")],
         ),
         thread("Quote received from SUPPLIER: OASIS CHEMICAL - Reference 9.41"),
         REGISTRIES,
@@ -234,8 +234,8 @@ def test_subject_prefixes_are_read_in_order() -> None:
 def test_recipients_internal_only_is_false_with_one_outsider() -> None:
     hints = build_hints(
         email(
-            to=[EmailAddress(address="michael.reed@our-company.com")],
-            cc=[EmailAddress(address="purchasing@new-company.com")],
+            to=[EmailAddress(address="michael.reed@ourcompany.example.com")],
+            cc=[EmailAddress(address="purchasing@newcompany.example.com")],
         ),
         thread(),
         REGISTRIES,

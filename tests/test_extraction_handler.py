@@ -37,8 +37,8 @@ from tests.fakes import FakeLLM, fake_settings
 
 REGISTRIES = Registries.load(
     Path("config/registries.yaml"),
-    mailbox="supply@our-company.com",
-    region_mailboxes={"uae": "dst.uae@our-company.com"})
+    mailbox="supply@ourcompany.example.com",
+    region_mailboxes={"uae": "dst.uae@ourcompany.example.com"})
 
 
 RFQ_VERDICT = LLMClassification(
@@ -161,7 +161,7 @@ class Sent(NamedTuple):
 class FakeMailbox:
     """A mailbox that hands back one attachment's bytes."""
 
-    address = "supply@our-company.com"
+    address = "supply@ourcompany.example.com"
 
     def __init__(self, *, download_fails: bool = False, forward_fails: bool = False) -> None:
         self.labels: list[list[str]] = []
@@ -212,8 +212,8 @@ def message(*attachments: Attachment, **overrides) -> EmailMessage:
         {
             "id": "AAMk-1",
             "subject": "RFQ 78432 / MV ALMI GLOBE / Jebel Ali",
-            "from": {"emailAddress": {"address": "purchasing@almiship.com"}},
-            "toRecipients": [{"emailAddress": {"address": "supply@our-company.com"}}],
+            "from": {"emailAddress": {"address": "purchasing@almi.example.com"}},
+            "toRecipients": [{"emailAddress": {"address": "supply@ourcompany.example.com"}}],
             "body": {"contentType": "text", "content": "Please quote the attached."},
             "hasAttachments": bool(attachments),
         }
@@ -422,8 +422,8 @@ async def test_an_email_the_rules_answer_is_never_downloaded(tmp_path: Path):
     internal = message(
         attachment(),
         **{
-            "from": {"emailAddress": {"address": "robert.hall@our-company.com"}},
-            "toRecipients": [{"emailAddress": {"address": "michael.reed@our-company.com"}}],
+            "from": {"emailAddress": {"address": "robert.hall@ourcompany.example.com"}},
+            "toRecipients": [{"emailAddress": {"address": "michael.reed@ourcompany.example.com"}}],
         })
 
     await handler.handle(internal)

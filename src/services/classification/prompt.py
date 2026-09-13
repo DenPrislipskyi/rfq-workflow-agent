@@ -68,7 +68,7 @@ Emails often arrive without a header block, so <email_metadata> may be mostly em
 read the greeting and the signature: an author who signs off as staff of the mailbox's own
 company is the chandler itself.
 
-The worked examples below come from one company's mailbox, so they show `our-company.com`
+The worked examples below come from one company's mailbox, so they show `ourcompany.example.com`
 addresses. That is the example company, not a rule - in a real email, the company is whatever
 the `mailbox` line says.
 

@@ -70,7 +70,7 @@ def test_no_separators_means_everything_is_the_newest_message() -> None:
 
 
 def test_short_newest_message_raises_a_warning() -> None:
-    body = "ok\n\nFrom: a@b.com\nSent: Monday\nSubject: RE: quote\nbody of the quoted mail"
+    body = "ok\n\nFrom: a@example.invalid\nSent: Monday\nSubject: RE: quote\nbody of the quoted mail"
     thread = split_thread(body)
     assert thread.warnings == [SUSPICIOUS_SPLIT]
     # The quoted history is still handed over - the caller decides what to do.
@@ -81,7 +81,7 @@ def test_banner_inside_a_quoted_body_is_not_a_boundary() -> None:
     """A CAUTION banner only starts a message when a header block follows it."""
     body = (
         "Dear John,\nprice is AED 100 per can.\n"
-        "\nFrom: john.baker@our-company.com\nSent: Monday\nSubject: RE: quote\n"
+        "\nFrom: john.baker@ourcompany.example.com\nSent: Monday\nSubject: RE: quote\n"
         "CAUTION: External Sender. Do not click links.\nDear John.\nMSDS attached.\n"
     )
     assert len(split_thread(body).quoted_messages) == 1
