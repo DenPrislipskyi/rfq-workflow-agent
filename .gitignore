@@ -325,11 +325,9 @@ data/
 # form we filled from them. The most sensitive folder in the repository.
 Database/
 
-# The generated test cases: built from the customer's own product catalogue.
-# `build.py` and `run.py` stay in git, so one command reproduces them.
-test_cases/*/
-test_cases_2/*/
-test_cases_3/*/
+# The end-to-end cases live under `data/` and are ignored with it: the folders
+# are built from the customer's own product catalogue, and the scripts that
+# build them went the same way rather than sitting alone in git.
 .DS_Store
 
 # Real customer emails. Reversible default: delete this line if the team decides
