@@ -21,8 +21,17 @@ def create_app() -> FastAPI:
     # them call this at all unless it is named here. Added only when there is
     # something to add: an API that answers webhooks needs no browser, and a
     # wildcard on one serving customer mail is not a default worth having.
-    if origins := settings.cors_origins:
+    if not (origins := settings.cors_origins):
+        # Said out loud, because the alternative is silence: with no middleware
+        # a preflight is answered `405 Method Not Allowed` by the router, which
+        # names neither CORS nor the setting that would have fixed it.
+        logger.warning(
+            "CORS_ORIGINS is empty - no browser may call this API. "
+            "A page trying to will see its preflight refused with 405."
+        )
+    else:
         logger.info("Browser requests allowed from %s", ", ".join(origins))
+    if origins:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=origins,
