@@ -5,7 +5,7 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 from src.core.config import get_settings
-from src.core.database import Base  # noqa: F401
+from src.core.database import Base, synchronous  # noqa: F401
 import src.infrastructure.db  # noqa: F401  imported for its side effect: the models
 
 # this is the Alembic Config object, which provides
@@ -29,8 +29,9 @@ PLACEHOLDER = "driver://user:pass@localhost/dbname"
 def get_url() -> str:
     """The database to migrate, with a driver that can do it synchronously.
 
-    Alembic's machinery is synchronous, so the `+asyncpg` the service connects
-    with is swapped for `+psycopg`. Same server, same database, different door.
+    Alembic's machinery is synchronous, so the URL is translated for a
+    synchronous driver - see `synchronous`. Same server, same database,
+    different door, and `ssl=` has to become `sslmode=` on the way through.
 
     Read from settings rather than from alembic.ini so that `alembic upgrade
     head` works from a shell with nothing but `.env` - and so that the URL
@@ -40,8 +41,7 @@ def get_url() -> str:
     if configured and configured != PLACEHOLDER:
         return configured
 
-    url = get_settings().DATABASE_URL.unicode_string()
-    return url.replace("postgresql+asyncpg", "postgresql+psycopg")
+    return synchronous(get_settings().DATABASE_URL.unicode_string())
 
 
 def run_migrations_offline() -> None:

@@ -17,6 +17,7 @@ from collections.abc import AsyncGenerator, AsyncIterable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import lru_cache
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from alembic.config import Config
 from pydantic import PostgresDsn
@@ -112,19 +113,45 @@ async def open_db_session() -> AsyncGenerator[AsyncSession]:
         await session.close()
 
 
+# The same setting, spelled differently by the two drivers. asyncpg takes
+# `ssl`, psycopg and psql take `sslmode`, and neither accepts the other's:
+# psycopg answers `invalid connection option "ssl"` and stops there.
+SSL_VALUES = {"true": "require", "false": "disable", "": "require"}
+
+
+def synchronous(url: str) -> str:
+    """The same database, described for a synchronous driver.
+
+    Alembic's machinery is synchronous, so a URL written for the service has to
+    be translated before it can be used to migrate. Two things change and both
+    matter:
+
+        postgresql+asyncpg  ->  postgresql+psycopg
+        ?ssl=require        ->  ?sslmode=require
+
+    The second is easy to miss and fails late: the driver swap alone leaves a
+    query parameter psycopg refuses, and the error arrives from inside the
+    connection pool rather than from anything that mentions Alembic.
+    """
+    url = url.replace("postgresql+asyncpg", "postgresql+psycopg")
+
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    if not any(key == "ssl" for key, _ in query):
+        return url
+
+    translated = [
+        ("sslmode", SSL_VALUES.get(value.lower(), value)) if key == "ssl" else (key, value)
+        for key, value in query
+    ]
+    return urlunsplit(parts._replace(query=urlencode(translated)))
+
+
 def get_alembic_config(
     database_url: PostgresDsn, script_location: str = "migrations"
 ) -> Config:
-    """Alembic pointed at one database, for running migrations from code.
-
-    The driver is swapped because Alembic's own machinery is synchronous. The
-    URL that reaches it therefore describes the same server through `psycopg`,
-    and `migrations/env.py` does the same swap when it is run from the CLI.
-    """
+    """Alembic pointed at one database, for running migrations from code."""
     alembic_config = Config()
     alembic_config.set_main_option("script_location", script_location)
-    alembic_config.set_main_option(
-        "sqlalchemy.url",
-        database_url.unicode_string().replace("postgresql+asyncpg", "postgresql+psycopg"),
-    )
+    alembic_config.set_main_option("sqlalchemy.url", synchronous(database_url.unicode_string()))
     return alembic_config
