@@ -58,10 +58,10 @@ def client(records: EmailRecords, changes: Changes | None = None) -> TestClient:
     return TestClient(app)
 
 
-def email(sender: str = "purchasing@new-company.com", **overrides) -> NormalizedEmail:
+def email(sender: str = "purchasing@newcompany.example.com", **overrides) -> NormalizedEmail:
     return NormalizedEmail(
         message_id="AAMkAGI2",
-        mailbox="supply@our-company.com",
+        mailbox="supply@ourcompany.example.com",
         sender=EmailAddress(address=sender),
         subject="VSL: NORTH STAR",
         body_text=BODY,
@@ -121,7 +121,7 @@ async def test_one_row_per_email_with_the_label_and_the_sender(tmp_path: Path):
     assert body["total"] == 1
     row = body["items"][0]
     assert row["labels"] == ["SSG RFQ"]
-    assert row["customerName"] == "purchasing@new-company.com"
+    assert row["customerName"] == "purchasing@newcompany.example.com"
     assert row["rowKey"] == record_id
 
 
@@ -169,7 +169,7 @@ async def test_the_list_is_rfqs_and_not_the_rest_of_the_mailbox(tmp_path: Path):
         delivery=RecordedDelivery(outcome=DeliveryOutcome.SENT.value),
     )
     await records.open(
-        email=email("noreply@marketing.com"),
+        email=email("noreply@marketing.example.invalid"),
         outcome=outcome(EmailCategory.SPAM_MARKETING, RecommendedAction.IGNORE),
         decision_id="bbbb-2",
         source="outlook",
@@ -178,7 +178,7 @@ async def test_the_list_is_rfqs_and_not_the_rest_of_the_mailbox(tmp_path: Path):
     body = client(records).get(URL).json()
 
     assert body["total"] == 1
-    assert body["items"][0]["customerName"] == "purchasing@new-company.com"
+    assert body["items"][0]["customerName"] == "purchasing@newcompany.example.com"
     assert body["items"][0]["status"] == "inProgress"
 
 
@@ -194,16 +194,16 @@ async def test_search_matches_the_two_columns_that_have_anything_in_them(
     tmp_path: Path,
 ):
     records = EmailRecords(tmp_path / "Database", enabled=True)
-    for index, sender in enumerate(["almi@almi.gr", "noreply@portal.com"]):
+    for index, sender in enumerate(["customer@almi.example.com", "noreply@portal.example.invalid"]):
         record_id = await records.open(
             email=email(sender), outcome=outcome(), decision_id=f"cccc-{index}", source="outlook"
         )
         await records.update(record_id, labels=["SSG RFQ" if index == 0 else "SSG No action"])
 
-    found = client(records).get(URL, params={"search": "almi"}).json()
+    found = client(records).get(URL, params={"search": "customer"}).json()
 
     assert found["total"] == 1
-    assert found["items"][0]["customerName"] == "almi@almi.gr"
+    assert found["items"][0]["customerName"] == "customer@almi.example.com"
 
 
 async def test_pages_are_pages(tmp_path: Path):
@@ -262,7 +262,7 @@ async def test_an_rfq_reads_as_its_lines(tmp_path: Path):
 
     body = client(records).get(f"{URL}/{record_id}/rfq").json()
 
-    assert body["customerName"] == "purchasing@new-company.com"
+    assert body["customerName"] == "purchasing@newcompany.example.com"
     assert body["vesselName"] == ""  # this record carries no extraction
     line = body["lines"][0]
     assert line["line"] == 1

@@ -50,7 +50,7 @@ from src.infrastructure.storage.records import (
 logger = logging.getLogger(__name__)
 
 SAMPLE = "sample"
-SENDER = "purchasing@almiship.com"
+SENDER = "purchasing@almi.example.com"
 VESSEL = "MV ALMI GLOBE"
 SUBJECT = "[SAMPLE] RFQ / MV ALMI GLOBE / Jebel Ali"
 BODY = (
@@ -174,7 +174,12 @@ def _matched(index: int, item: CatalogItem, quantity: str, uom: str) -> Recorded
         how="code_confirmed" if by_code else "search",
         why="Sample line: the sheet records this product against this wording.",
         candidates=[
-            RecordedCandidate(item_code=item.code, description=item.description, confidence=96 if by_code else 88)
+            RecordedCandidate(
+                item_code=item.code,
+                description=item.description,
+                confidence=96 if by_code else 88,
+                item=dict(item.fields),
+            )
         ],
     )
 
@@ -195,8 +200,9 @@ def _refused(index: int, catalog: Catalog, shortlist: int) -> RecordedMatch:
                 item_code=candidate.item.code,
                 description=candidate.item.description,
                 # Falling scores, so the screen has something to draw. A real
-                # one comes from the model; this tool never asks it anything.
+                # one is the search's own ranking; this tool ranks nothing.
                 confidence=max(5, 40 - 8 * position),
+                item=dict(candidate.item.fields),
             )
             for position, candidate in enumerate(candidates)
         ],

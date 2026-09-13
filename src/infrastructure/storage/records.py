@@ -110,13 +110,17 @@ class RecordedExtraction(BaseModel):
 
 
 class RecordedCandidate(BaseModel):
-    """One product the model was shown for a line, and what it made of it."""
+    """One product the search offered for a line, and how far behind it ranked."""
 
     item_code: str
     description: str = ""
-    # 0-100, the model's own opinion. Not a probability, not calibrated, and
-    # nothing decides on it - an operator reads it, no threshold acts on it.
+    # 0-100, this candidate's search score as a percentage of the best one on
+    # the same line. Not a probability, and not comparable between lines.
     confidence: int = 0
+    # The whole row of the sheet, as for a match: the table shows a candidate
+    # in the same columns it shows a confirmed product, and it may not have
+    # fewer of them just because nothing has been confirmed yet.
+    item: dict[str, Any] = Field(default_factory=dict)
 
 
 class RecordedMatch(BaseModel):

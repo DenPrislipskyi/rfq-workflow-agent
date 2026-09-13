@@ -185,13 +185,16 @@ async def events(changes: Changes) -> AsyncIterator[str]:
 
 
 class MatchCandidate(Wire):
-    """One product the line was shown, and what the model made of it."""
+    """One product the search offered for a line, with its whole sheet row."""
 
     item_code: str
     description: str = ""
-    # 0-100, and the model's own opinion of itself. Shown to a person; nothing
-    # in the service decides on it, because it is not a calibrated probability.
+    # 0-100, this candidate's search score as a percentage of the best one on
+    # the same line. Shown to a person; nothing in the service decides on it.
     confidence: int = 0
+    # Every column of the sheet's row, so that a candidate fills the same
+    # columns of the table as a confirmed product does.
+    item: dict[str, Any] = Field(default_factory=dict)
 
 
 class MatchRow(Wire):
@@ -332,6 +335,7 @@ def _line(number: int, match: RecordedMatch) -> MatchRow:
                 item_code=one.item_code,
                 description=one.description,
                 confidence=one.confidence,
+                item=dict(one.item),
             )
             for one in match.candidates
         ],
