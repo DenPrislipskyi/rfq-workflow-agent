@@ -19,6 +19,10 @@ from src.infrastructure.outlook.mailbox import Mailbox
 from src.infrastructure.outlook.subscription import SubscriptionManager
 from src.infrastructure.storage.changes import Changes
 from src.infrastructure.storage.decisions import DecisionLog
+from src.core.database import _async_session_factory
+from src.infrastructure.blobs import AzureBlobs, Blobs, FolderBlobs
+from src.infrastructure.storage.database import DatabaseRecords
+from src.infrastructure.storage.protocol import Records
 from src.infrastructure.storage.records import EmailRecords
 from src.infrastructure.storage.workbooks import WorkbookStore
 from src.services.catalog import CatalogService
@@ -40,7 +44,7 @@ class LifespanState(TypedDict):
     llms: LLMRegistry
     notification_service: NotificationService
     subscription_manager: SubscriptionManager
-    records: EmailRecords
+    records: Records
     changes: Changes
     catalog: CatalogService
 
@@ -84,12 +88,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
     # The store writes; this says so. Kept apart because they are two jobs:
     # one owns the folder, the other owns "an open page should look again".
     changes = Changes()
-    records = EmailRecords(
-        settings.DATABASE_PATH,
-        enabled=settings.DATABASE_ENABLED,
-        keep_attachments=settings.DATABASE_KEEP_ATTACHMENTS,
-        changes=changes,
-    )
+    records = build_records(settings, changes)
 
     triage = EmailTriage(
         pipeline=pipeline,
@@ -185,6 +184,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
             )
         finally:
             await catalog.stop()
+            # The blob client holds an aiohttp session and a connector. Left
+            # open, they outlive the app and say so on the way out.
+            closing = getattr(records, "aclose", None)
+            if closing is not None:
+                await closing()
             if settings.OUTLOOK_ENABLED:
                 await subscriptions.stop()
 
@@ -206,6 +210,52 @@ def build_matching(settings: Settings, llms: LLMRegistry) -> MatchingPipeline | 
     )
 
 
+def build_records(settings: Settings, changes: Changes) -> Records:
+    """Where a record goes: a folder on disk, or Postgres with a container.
+
+    Both satisfy the same protocol, so nothing above this line knows which one
+    it has. The folder is the default because it needs nothing configured - a
+    checkout with an empty `.env` runs, and so does the test suite.
+    """
+    if settings.RECORDS_STORE != "postgres":
+        logger.info("Records are kept in %s", settings.DATABASE_PATH)
+        return EmailRecords(
+            settings.DATABASE_PATH,
+            enabled=settings.DATABASE_ENABLED,
+            keep_attachments=settings.DATABASE_KEEP_ATTACHMENTS,
+            changes=changes,
+        )
+
+    blobs = build_blobs(settings)
+    logger.info(
+        "Records go to Postgres, files to %s",
+        "the container " + settings.AZURE_STORAGE_CONTAINER
+        if settings.AZURE_STORAGE_CONNECTION_STRING
+        else settings.BLOB_FOLDER_PATH,
+    )
+    return DatabaseRecords(
+        _async_session_factory(),
+        blobs,
+        enabled=settings.DATABASE_ENABLED,
+        keep_attachments=settings.DATABASE_KEEP_ATTACHMENTS,
+        changes=changes,
+    )
+
+
+def build_blobs(settings: Settings) -> Blobs:
+    """The container, or a folder standing in for it.
+
+    No connection string is not an error: a local Postgres with the files on
+    disk beside it is how this is developed, and the two answer identically.
+    """
+    if settings.AZURE_STORAGE_CONNECTION_STRING is None:
+        return FolderBlobs(settings.BLOB_FOLDER_PATH)
+    return AzureBlobs(
+        settings.AZURE_STORAGE_CONNECTION_STRING.get_secret_value(),
+        settings.AZURE_STORAGE_CONTAINER,
+    )
+
+
 def build_catalog(settings: Settings, http_client: httpx.AsyncClient) -> CatalogService:
     """Our product list, from the desk's sheet through a snapshot on disk.
 
@@ -221,10 +271,9 @@ def build_catalog(settings: Settings, http_client: httpx.AsyncClient) -> Catalog
         sheet,
         Snapshot(settings.CATALOG_SNAPSHOT_PATH),
         code_column=settings.CATALOG_CODE_COLUMN,
-        description_column=settings.CATALOG_DESCRIPTION_COLUMN,
+        description_column=settings.CATALOG_SHOWN_COLUMN,
         customer_code_column=settings.CATALOG_CUSTOMER_CODE_COLUMN,
-        customer_description_column=settings.CATALOG_CUSTOMER_DESCRIPTION_COLUMN,
-        index_item_description=settings.CATALOG_INDEX_ITEM_DESCRIPTION,
+        customer_description_column=settings.CATALOG_SEARCH_COLUMN,
         refresh_minutes=settings.CATALOG_REFRESH_MINUTES,
     )
 

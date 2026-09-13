@@ -27,7 +27,7 @@ import asyncio
 import logging
 import os
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -374,11 +374,17 @@ class EmailRecords:
 
     # --- reading ----------------------------------------------------------
 
-    def all(self) -> Iterator[EmailRecord]:
-        """Every record, newest first. Unreadable folders are skipped, loudly."""
-        if not self._root.exists():
-            return
+    async def all(self) -> list[EmailRecord]:
+        """Every record, newest first. Unreadable folders are skipped, loudly.
 
+        Async to match the store that reads a database. Nothing here awaits:
+        the folder is local, and a thread per listing would cost more than the
+        listing does.
+        """
+        if not self._root.exists():
+            return []
+
+        found = []
         for folder in sorted(self._root.iterdir(), reverse=True):
             if not folder.is_dir():
                 continue
@@ -386,17 +392,18 @@ class EmailRecords:
             if record is None:
                 logger.warning("Skipping %s: no readable %s in it", folder.name, RECORD)
                 continue
-            yield record
+            found.append(record)
+        return found
 
-    def read(self, record_id: str) -> EmailRecord | None:
+    async def read(self, record_id: str) -> EmailRecord | None:
         """One record by id, or None when there is no such folder."""
         folder = self._folder(record_id)
         return _read(folder / RECORD) if folder else None
 
-    def file(self, record_id: str, relative: str) -> Path | None:
-        """A file inside one record, or None when it is not there.
+    async def file(self, record_id: str, saved_as: str) -> bytes | None:
+        """The bytes of one file inside a record, or None when it is not there.
 
-        `relative` comes off a record and therefore from a URL. It is resolved
+        `saved_as` comes off a record and therefore from a URL. It is resolved
         against the record's folder and refused if it lands anywhere else, so
         that `../../.env` is a 404 rather than a file.
         """
@@ -404,10 +411,10 @@ class EmailRecords:
         if folder is None:
             return None
 
-        target = (folder / relative).resolve()
+        target = (folder / saved_as).resolve()
         if not target.is_file() or folder.resolve() not in target.parents:
             return None
-        return target
+        return target.read_bytes()
 
     # --- the disk ---------------------------------------------------------
 

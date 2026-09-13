@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
@@ -127,7 +127,7 @@ async def list_quotes(
     hundred records a day, the folder is local, and a cache that can be stale
     is a bug report about an email that "did not arrive" when it did.
     """
-    rows = [_row(record) for record in records.all() if _is_rfq(record)]
+    rows = [_row(record) for record in await records.all() if _is_rfq(record)]
 
     needle = search.strip().lower()
     if needle:
@@ -245,7 +245,7 @@ async def read_rfq(record_id: str, records: RecordsDep) -> RfqDetail:
     that, and it carries the model's reasoning, the customer's body text and
     every file name. This one carries the lines and nothing else.
     """
-    record = records.read(record_id)
+    record = await records.read(record_id)
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such RFQ")
 
@@ -269,24 +269,34 @@ async def read_quote(record_id: str, records: RecordsDep) -> EmailRecord:
     meant to be - this is what a person opens when they want to know why an
     email was labelled the way it was.
     """
-    record = records.read(record_id)
+    record = await records.read(record_id)
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such email")
     return record
 
 
 @router.get("/{record_id}/files/{path:path}", status_code=status.HTTP_200_OK)
-async def read_file(record_id: str, path: str, records: RecordsDep) -> FileResponse:
+async def read_file(record_id: str, path: str, records: RecordsDep) -> Response:
     """One file out of a record: an attachment as it arrived, or the filled form.
 
-    `path` is what the record itself printed under `savedAs`. It is resolved
-    inside the record's folder and refused if it points anywhere else, so a
-    guessed path is a 404 rather than a file.
+    `path` is what the record itself printed under `savedAs`. The store refuses
+    a name that is not one of this record's own, so a guessed path is a 404
+    rather than somebody else's attachment.
+
+    The bytes come back through here rather than from a link to storage. That
+    is the whole reason the container is private: an attachment is a customer's
+    file, and a URL anybody can follow is not a permission model.
     """
-    target = records.file(record_id, path)
-    if target is None:
+    data = await records.file(record_id, path)
+    if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such file")
-    return FileResponse(target, filename=target.name)
+
+    name = path.rsplit("/", 1)[-1]
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
 
 
 def _row(record: EmailRecord) -> QuoteRow:

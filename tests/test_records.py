@@ -114,7 +114,7 @@ async def test_an_attachment_is_kept_exactly_as_it_arrived(tmp_path: Path):
         files=[SourceFile(filename="Requisition.xlsx", data=b"PK\x03\x04 rows", size_bytes=9)],
     )
 
-    record = records.read(record_id)
+    record = await records.read(record_id)
     assert record is not None
     kept = record.attachments[0]
     assert kept.saved_as == "Requisition.xlsx"
@@ -131,7 +131,7 @@ async def test_a_filename_cannot_write_outside_its_own_folder(tmp_path: Path):
         files=[SourceFile(filename="../../../.env", data=b"stolen", size_bytes=6)],
     )
 
-    record = records.read(record_id)
+    record = await records.read(record_id)
     assert record is not None
     # The last segment, and not a dot-file either: what arrives is written
     # somewhere visible inside this record's own folder, or not at all.
@@ -152,7 +152,7 @@ async def test_two_files_with_one_name_do_not_overwrite_each_other(tmp_path: Pat
         ],
     )
 
-    record = records.read(record_id)
+    record = await records.read(record_id)
     assert record is not None
     assert [item.saved_as for item in record.attachments] == ["rfq.xlsx", "rfq (2).xlsx"]
 
@@ -171,7 +171,7 @@ async def test_a_file_with_no_bytes_is_recorded_with_the_reason(tmp_path: Path):
         ],
     )
 
-    record = records.read(record_id)
+    record = await records.read(record_id)
     assert record is not None
     assert [item.saved_as for item in record.attachments] == [None, None]
     assert all(item.note for item in record.attachments)
@@ -183,7 +183,7 @@ async def test_an_email_nobody_downloaded_says_so(tmp_path: Path):
     records = store(tmp_path)
     record_id = await opened(records)
 
-    record = records.read(record_id)
+    record = await records.read(record_id)
     assert record is not None
     assert [item.filename for item in record.attachments] == ["Requisition.xlsx"]
     assert record.attachments[0].saved_as is None
@@ -198,7 +198,7 @@ async def test_keeping_attachments_off_leaves_the_record_and_drops_the_bytes(tmp
         record_id, files=[SourceFile(filename="rfq.xlsx", data=b"rows", size_bytes=4)]
     )
 
-    record = records.read(record_id)
+    record = await records.read(record_id)
     assert record is not None
     assert record.attachments[0].size_bytes == 4
     assert record.attachments[0].saved_as is None
@@ -220,7 +220,7 @@ async def test_what_became_of_the_email_lands_on_the_same_record(tmp_path: Path)
         form=("KASS_RFQ_NORTH_STAR.xlsx", b"PK\x03\x04 workbook"),
     )
 
-    record = records.read(record_id)
+    record = await records.read(record_id)
     assert record is not None
     assert record.labels == ["SSG RFQ"] and record.labelled is True
     assert record.extraction is not None and record.extraction.items == 15
@@ -266,7 +266,7 @@ async def test_an_attachment_cannot_take_a_name_of_ours(tmp_path: Path):
         ],
     )
 
-    record = records.read(record_id)
+    record = await records.read(record_id)
     assert record is not None
     assert [item.saved_as for item in record.attachments] == ["email (2).json", "body (2).txt"]
     assert record.subject == "VSL: NORTH STAR"
@@ -283,7 +283,7 @@ async def test_our_form_cannot_overwrite_a_file_of_the_customer_s(tmp_path: Path
         form=("rfq.xlsx", b"ours"),
     )
 
-    record = records.read(record_id)
+    record = await records.read(record_id)
     assert record is not None
     assert record.form is not None and record.form.saved_as == "rfq (2).xlsx"
     assert (tmp_path / "Database" / record_id / "rfq.xlsx").read_bytes() == b"theirs"
@@ -298,7 +298,7 @@ async def test_the_verdict_survives_every_later_write(tmp_path: Path):
     await records.update(record_id, labels=["SSG RFQ"])
     await records.update(record_id, delivery=RecordedDelivery(outcome="SENT"))
 
-    record = records.read(record_id)
+    record = await records.read(record_id)
     assert record is not None
     assert record.verdict is not None
     assert record.verdict.category == "NEW_RFQ"
@@ -372,7 +372,7 @@ async def test_records_come_back_newest_first(tmp_path: Path):
         source="outlook",
     )
 
-    assert [item.id for item in records.all()] == [second, first]
+    assert [item.id for item in await records.all()] == [second, first]
 
 
 async def test_a_file_is_only_served_from_inside_its_own_record(tmp_path: Path):
@@ -380,10 +380,10 @@ async def test_a_file_is_only_served_from_inside_its_own_record(tmp_path: Path):
     record_id = await opened(records)
     (tmp_path / "secret.txt").write_text("not yours")
 
-    assert records.file(record_id, "body.txt") is not None
-    assert records.file(record_id, "../../secret.txt") is None
-    assert records.file("../../", "secret.txt") is None
-    assert records.file(record_id, "attachments/nothing.xlsx") is None
+    assert await records.file(record_id, "body.txt") is not None
+    assert await records.file(record_id, "../../secret.txt") is None
+    assert await records.file("../../", "secret.txt") is None
+    assert await records.file(record_id, "attachments/nothing.xlsx") is None
 
 
 def _at(value: str) -> datetime:
