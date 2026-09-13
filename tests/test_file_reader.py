@@ -246,6 +246,23 @@ async def test_a_catalogue_heading_inside_the_table_is_not_an_item():
     assert [item.description for item in found.items] == ["ISOPROPANOL", "CITRIC ACID"]
 
 
+async def test_a_line_nobody_counted_is_still_a_line():
+    """A heading is a description and nothing else. A row carrying a code or a
+    unit is something somebody meant to order and forgot to count, and dropping
+    it loses the position: the customer never learns it was not quoted."""
+    rows = [
+        HEADER,
+        ["1", "NI55910", "ISOPROPANOL", "170", "LT"],
+        ["2", "5949-29-1", "CITRIC ACID", None, "BAG"],
+        [None, None, "CHEMICALS [65]", None, None],
+    ]
+    found = await read(sheet(rows), grid_answer())
+
+    assert [item.description for item in found.items] == ["ISOPROPANOL", "CITRIC ACID"]
+    assert found.items[1].quantity is None, "empty, not guessed"
+    assert found.items[1].uom == "BAG", "and everything the row did say is kept"
+
+
 async def test_a_thousand_rows_cost_one_call():
     """The whole reason the model names columns instead of transcribing."""
     rows = [[str(n), f"5501{n:03}", f"ROPE {n}", str(n), "coil"] for n in range(1, 1001)]

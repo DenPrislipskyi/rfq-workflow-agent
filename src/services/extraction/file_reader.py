@@ -365,7 +365,18 @@ def _copy_rows(block: TableBlock, mapping: TableMapping, *, start_at: int) -> li
         # Requisitions group items under catalogue headings written into the
         # description column - "CHEMICALS [65]". They read as items and are not:
         # nobody is ordering a quantity of them.
-        if quantified and not values.get(ItemField.QUANTITY):
+        #
+        # A heading is a description and nothing else, though, and that is what
+        # this drops. A row carrying a code or a unit is a line somebody meant
+        # to order and forgot to count - it stays, with an empty quantity and a
+        # blank on the form beside it. Dropping it loses the position entirely,
+        # and a position nobody can see is worse than one nobody can price.
+        if (
+            quantified
+            and not values.get(ItemField.QUANTITY)
+            and not values.get(ItemField.CUSTOMER_ITEM_CODE)
+            and not values.get(ItemField.UOM)
+        ):
             continue
 
         items.append(
