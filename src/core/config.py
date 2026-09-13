@@ -176,6 +176,17 @@ class Settings(BaseSettings):
     # code is dropped and the catalogue is searched by description instead.
     MATCHING_AGREEMENT_PERCENT: float = 80.0
 
+    # --- The browser ------------------------------------------------------------
+    # Origins allowed to call this API from a page, comma separated. The front
+    # end is served from a different host than the API - a static site on one
+    # domain, this on another - and a browser refuses that unless the API says
+    # otherwise.
+    #
+    # Empty means no browser may call it, which is the right default for an
+    # API that mostly answers webhooks: a permissive `*` on an API serving
+    # customer mail is not a setting anyone should arrive at by accident.
+    CORS_ORIGINS: str = ""
+
     # --- Where records and files go -------------------------------------------
     # The database and a blob container, which is what everything runs on now.
     #
@@ -252,6 +263,11 @@ class Settings(BaseSettings):
         env_file=".env",
         extra="ignore",
     )
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """`CORS_ORIGINS` as a list. Blank entries and stray spaces dropped."""
+        return [one.strip() for one in self.CORS_ORIGINS.split(",") if one.strip()]
 
     @property
     def authority_url(self) -> str:
