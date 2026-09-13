@@ -101,6 +101,25 @@ def test_with_nothing_configured_a_preflight_is_refused(app_with):
     assert "access-control-allow-origin" not in preflight.headers
 
 
+def test_a_wildcard_answers_everyone_and_drops_credentials(app_with):
+    """`*` with credentials is a combination every browser discards, so the
+    wildcard turns them off rather than producing a failure with no message."""
+    client = app_with("*")
+
+    response = client.get("/health-check", headers={"Origin": SOMEBODY_ELSE})
+
+    assert response.headers.get("access-control-allow-origin") == "*"
+    assert "access-control-allow-credentials" not in response.headers
+
+
+def test_a_named_origin_keeps_credentials(app_with):
+    client = app_with(PAGE)
+
+    response = client.get("/health-check", headers={"Origin": PAGE})
+
+    assert response.headers.get("access-control-allow-credentials") == "true"
+
+
 def test_an_empty_setting_says_so_in_the_log(app_with, caplog):
     """Because 405 names neither CORS nor the setting that would fix it, and a
     log that stays silent sends somebody to read the router."""

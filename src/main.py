@@ -29,16 +29,23 @@ def create_app() -> FastAPI:
             "CORS_ORIGINS is empty - no browser may call this API. "
             "A page trying to will see its preflight refused with 405."
         )
+    elif origins == ["*"]:
+        # Fine while nothing here authenticates anybody: CORS protects a user's
+        # session from another site, and there is no session to protect. It
+        # stops being fine the day this grows a login.
+        logger.warning("Browser requests allowed from ANY origin - CORS_ORIGINS is `*`")
     else:
         logger.info("Browser requests allowed from %s", ", ".join(origins))
     if origins:
+        # `*` and credentials are mutually exclusive in every browser: a
+        # response carrying both is discarded, and the request looks like a
+        # plain CORS failure with nothing to say why. So the wildcard turns
+        # credentials off rather than producing that combination.
+        wildcard = origins == ["*"]
         app.add_middleware(
             CORSMiddleware,
             allow_origins=origins,
-            # Named rather than wildcarded, because a wildcard and credentials
-            # are mutually exclusive in every browser - and this will carry a
-            # session one day.
-            allow_credentials=True,
+            allow_credentials=not wildcard,
             allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
             allow_headers=["*"],
         )
