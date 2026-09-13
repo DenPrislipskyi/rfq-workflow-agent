@@ -8,19 +8,34 @@ otherwise identical sentence.
 
 from src.domain.rules.catalog import Catalog, CatalogItem, normalize_code, tokenize
 
+# Two columns per row, and the difference between them is the point. Ours is
+# what the table shows for a product; the customer's is what the search reads,
+# because a line of an RFQ is written by a customer.
 ROWS = [
-    {"Item Code": "T69128400", "Item Description": "HEX HEAD BOLT/NUT STEEL UNGALV, M16 X 65MM"},
-    {"Item Code": "T69133100", "Item Description": "HEX HEAD BOLT/NUT STEEL UNGALV, M20 X 80MM"},
-    {"Item Code": "T69114500", "Item Description": "HEX HEAD BOLT/NUT STEEL UNGALV, M8 X 50MM"},
-    {"Item Code": "T85111100", "Item Description": "GOGGLE WELDER METAL FLIP-UP, 45MM LENS DIAM"},
-    {"Item Code": "T85116300", "Item Description": "WELDER GLOVES FIVE FINGERS"},
-    {"Item Code": "T65082300", "Item Description": "RULE CONVEX STEEL METRIC 5MTR"},
-    {"Item Code": "T11018800", "Item Description": "ROD FISHING WITH FURTHER, DETAILS"},
+    {"Item Code": "T69128400", "Item Description": "HEX HEAD BOLT/NUT STEEL UNGALV, M16 X 65MM",
+     "Customer Description": "Hexagon Head Bolts Full Threaded (Bolt with Nut) M16*65"},
+    {"Item Code": "T69133100", "Item Description": "HEX HEAD BOLT/NUT STEEL UNGALV, M20 X 80MM",
+     "Customer Description": "Hexagon Head Bolts Full Threaded (Bolt with Nut) M20*80"},
+    {"Item Code": "T69114500", "Item Description": "HEX HEAD BOLT/NUT STEEL UNGALV, M8 X 50MM",
+     "Customer Description": "Hexagon Head Bolts Full Threaded (Bolt with Nut) M8*50"},
+    {"Item Code": "T85111100", "Item Description": "GOGGLE WELDER METAL FLIP-UP, 45MM LENS DIAM",
+     "Customer Description": "WELDING GOGGLES"},
+    {"Item Code": "T85116300", "Item Description": "WELDER GLOVES FIVE FINGERS",
+     "Customer Description": "Weldings gloves(five fingers)"},
+    {"Item Code": "T65082300", "Item Description": "RULE CONVEX STEEL METRIC 5MTR",
+     "Customer Description": "Convex rulers steel 5m"},
+    {"Item Code": "T11018800", "Item Description": "ROD FISHING WITH FURTHER, DETAILS",
+     "Customer Description": "EXTERNAL HDD 4TB"},
 ]
 
 
 def catalog(rows=ROWS) -> Catalog:
-    return Catalog.from_rows(rows, code_column="Item Code", description_column="Item Description")
+    return Catalog.from_rows(
+        rows,
+        code_column="Item Code",
+        description_column="Item Description",
+        customer_description_column="Customer Description",
+    )
 
 
 # --- what gets into the catalogue at all ---------------------------------
@@ -101,7 +116,15 @@ def test_a_query_that_normalizes_to_nothing_matches_nothing():
 
 
 def test_a_description_in_another_script_survives_normalization():
-    built = catalog([{"Item Code": "T1", "Item Description": "(주)씨웨이글로벌 ROPE"}])
+    built = catalog(
+        [
+            {
+                "Item Code": "T1",
+                "Item Description": "ROPE",
+                "Customer Description": "(주)씨웨이글로벌 ROPE",
+            }
+        ]
+    )
 
     assert tokenize("(주)씨웨이글로벌") == ["주", "씨웨이글로벌"]
     assert built.search("씨웨이글로벌")[0].item.code == "T1"
@@ -112,9 +135,12 @@ def test_one_candidate_per_product_however_many_rows_it_has():
     writing one boilersuit is one option, not five."""
     built = catalog(
         [
-            {"Item Code": "T31237400", "Item Description": "BOILERSUIT NAVY 3XL"},
-            {"Item Code": "T31237400", "Item Description": "BOILERSUIT NAVY 2XL"},
-            {"Item Code": "T19036300", "Item Description": "SNEAKERS STEEL TOE 25CM"},
+            {"Item Code": "T31237400", "Item Description": "BOILERSUIT NAVY 3XL",
+             "Customer Description": "boilersuit navy 3XL"},
+            {"Item Code": "T31237400", "Item Description": "BOILERSUIT NAVY 2XL",
+             "Customer Description": "boilersuit navy 2XL"},
+            {"Item Code": "T19036300", "Item Description": "SNEAKERS STEEL TOE 25CM",
+             "Customer Description": "sneakers steel toe 25cm"},
         ]
     )
 
@@ -151,25 +177,28 @@ def _with_wording(*, indexed: bool) -> Catalog:
         code_column="Item Code",
         description_column="Item Description",
         customer_description_column="Customer Description",
-        index_customer_description=indexed,
+        index_item_description=indexed,
     )
 
 
-def test_the_customer_s_wording_is_kept_whether_or_not_it_is_searched():
-    """Whatever chooses between candidates should see how this product was
-    once asked for, even when the ranking does not use it."""
+def test_the_customer_s_wording_is_what_the_search_reads():
+    """A line of an RFQ is written by a customer, so what it resembles is how
+    a customer asked for the same thing before."""
+    assert _with_wording(indexed=False).search("sanitiser gel")[0].item.code == "T55029103"
     assert _with_wording(indexed=False).items[0].customer_description == "sanitiser gel"
 
 
-def test_the_customer_s_wording_is_searched_only_when_that_is_switched_on():
-    """Measured rather than assumed: a second wording sounds like free recall
-    and measures as the opposite while each product is mentioned once."""
-    assert _with_wording(indexed=False).search("sanitiser gel") == []
-    assert _with_wording(indexed=True).search("sanitiser gel")[0].item.code == "T55029103"
+def test_our_own_wording_is_searched_only_when_that_is_switched_on():
+    """Off by default: the desk's specification is that a line is matched
+    against the sheet's customer wording column, and that column alone."""
+    assert _with_wording(indexed=False).search("hand wash dettol pump bottle") == []
+    assert _with_wording(indexed=True).search("hand wash dettol pump bottle")[0].item.code == (
+        "T55029103"
+    )
 
 
 def test_the_shortlist_is_as_long_as_it_was_asked_to_be():
-    assert len(catalog().search("steel", limit=2)) == 2
+    assert len(catalog().search("hexagon head bolts", limit=2)) == 2
 
 
 def test_our_code_pasted_into_the_description_still_finds_the_item():
@@ -193,14 +222,31 @@ def test_the_code_leads_the_shortlist_and_the_words_confirm_it():
     assert shortlist.conflicted is False
 
 
-def test_a_code_the_customer_s_own_words_contradict_is_flagged():
-    """The desk's own example: 110188 is quoted for an external hard drive, and
-    the item that code names is a fishing rod. The code is not the answer."""
-    shortlist = catalog().shortlist(code="T11018800", description="EXTERNAL HDD 4TB")
+def test_a_code_whose_customer_wording_says_something_else_is_flagged():
+    """A code is confirmed by the wording the sheet files it under, so what
+    contradicts it is a line that wording does not answer."""
+    shortlist = catalog().shortlist(code="T69128400", description="Convex rulers steel 5m")
 
     assert shortlist.by_code is not None
     assert shortlist.confirmed is False
     assert shortlist.conflicted is True
+
+
+def test_the_desks_negative_mapping_is_no_longer_visible_here():
+    """Row 110188 is the desk's own example of a mapping that went wrong: the
+    customer asked for a hard drive and the item the code names is a fishing
+    rod. Searching the customer wording column cannot see that, because that
+    column is the customer's request - it agrees with the customer by
+    construction. Matching this code now returns the fishing rod.
+
+    Kept as a test rather than left implicit: it is a consequence of the
+    specification, and it should fail loudly if the specification changes."""
+    shortlist = catalog().shortlist(code="T11018800", description="EXTERNAL HDD 4TB")
+
+    assert shortlist.by_code is not None
+    assert shortlist.by_code.description == "ROD FISHING WITH FURTHER, DETAILS"
+    assert shortlist.confirmed is True
+    assert shortlist.conflicted is False
 
 
 def test_a_line_with_no_code_is_ranked_on_its_words_alone():

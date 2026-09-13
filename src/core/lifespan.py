@@ -25,7 +25,7 @@ from src.services.catalog import CatalogService
 from src.services.classification.pipeline import ClassificationPipeline
 from src.services.extraction import ExtractionPipeline, FileReader, HeaderReader
 from src.services.handlers import ClassifyingEmailHandler
-from src.services.matching import ItemChooser, LineDescriber, MatchingPipeline
+from src.services.matching import LineDescriber, MatchingPipeline
 from src.services.notification_service import NotificationService
 from src.services.triage import EmailTriage
 from src.services.workbook import WorkbookBuilder
@@ -201,8 +201,8 @@ def build_matching(settings: Settings, llms: LLMRegistry) -> MatchingPipeline | 
 
     return MatchingPipeline(
         LineDescriber(llms.text),
-        ItemChooser(llms.text),
         candidates=settings.CATALOG_SHORTLIST,
+        agreement=settings.MATCHING_AGREEMENT_PERCENT,
     )
 
 
@@ -224,7 +224,7 @@ def build_catalog(settings: Settings, http_client: httpx.AsyncClient) -> Catalog
         description_column=settings.CATALOG_DESCRIPTION_COLUMN,
         customer_code_column=settings.CATALOG_CUSTOMER_CODE_COLUMN,
         customer_description_column=settings.CATALOG_CUSTOMER_DESCRIPTION_COLUMN,
-        index_customer_description=settings.CATALOG_INDEX_CUSTOMER_DESCRIPTION,
+        index_item_description=settings.CATALOG_INDEX_ITEM_DESCRIPTION,
         refresh_minutes=settings.CATALOG_REFRESH_MINUTES,
     )
 

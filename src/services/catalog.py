@@ -43,7 +43,7 @@ class CatalogService:
         refresh_minutes: int,
         customer_code_column: str = "",
         customer_description_column: str = "",
-        index_customer_description: bool = False,
+        index_item_description: bool = False,
         startup_delay_seconds: float = STARTUP_DELAY_SECONDS,
     ) -> None:
         # None when no sheet is configured: the snapshot on disk is then the
@@ -54,7 +54,7 @@ class CatalogService:
         self._description_column = description_column
         self._customer_code_column = customer_code_column
         self._customer_description_column = customer_description_column
-        self._index_customer_description = index_customer_description
+        self._index_item_description = index_item_description
         self._refresh_minutes = refresh_minutes
         self._startup_delay_seconds = startup_delay_seconds
 
@@ -163,5 +163,5 @@ class CatalogService:
             description_column=self._description_column,
             customer_code_column=self._customer_code_column,
             customer_description_column=self._customer_description_column,
-            index_customer_description=self._index_customer_description,
+            index_item_description=self._index_item_description,
         )

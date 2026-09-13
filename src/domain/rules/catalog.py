@@ -143,16 +143,15 @@ class Catalog:
     """Our product list, indexed for the two questions anyone asks of it."""
 
     def __init__(
-        self, items: Sequence[CatalogItem], *, index_customer_description: bool = False
+        self, items: Sequence[CatalogItem], *, index_item_description: bool = False
     ) -> None:
         self._items = list(items)
-        # Whether a customer's past wording is searched, as opposed to merely
-        # kept. Two different decisions: the wording is worth having on the
-        # item either way - whatever chooses between candidates later should
-        # see how this product was once asked for - but whether it helps the
-        # ranking is a question for `catalog_recall`, and on a sheet that
-        # mentions each product once the answer is no.
-        self._index_customer_description = index_customer_description
+        # What the search reads is the customer wording column: the sheet is a
+        # history of mappings, and the wording an incoming line resembles is
+        # the wording a customer used before, not ours. Our own product
+        # description is what the table shows for a match; it is not searched
+        # unless this is switched on.
+        self._index_item_description = index_item_description
 
         # Our own codes are the keys, and the first row wins wherever a code
         # repeats: the sheet is meant to hold each code once, so a repeat is a
@@ -197,7 +196,7 @@ class Catalog:
         description_column: str,
         customer_code_column: str = "",
         customer_description_column: str = "",
-        index_customer_description: bool = False,
+        index_item_description: bool = False,
     ) -> "Catalog":
         """Build from rows of a spreadsheet, by column heading.
 
@@ -224,7 +223,7 @@ class Catalog:
                         fields={key: value for key, value in row.items() if key},
                     )
                 )
-        return cls(items, index_customer_description=index_customer_description)
+        return cls(items, index_item_description=index_item_description)
 
     def by_code(self, code: str | None) -> CatalogItem | None:
         """The item this code names - ours, or the customer's own.
@@ -321,17 +320,17 @@ class Catalog:
     def _words(self, item: CatalogItem) -> list[str]:
         """What an item is indexed under.
 
-        Our own description and our code, always. How a customer once asked for
-        the same product only when that is switched on - it is a second wording
-        of one product, which sounds like free recall and measures as the
-        opposite while each product is mentioned once.
+        How a customer once asked for this product, and our code, always. Our
+        own shelf description only when that is switched on: a line of an RFQ
+        is written by a customer, so what it resembles is the customer wording
+        column of the sheet.
 
         The code is in there because customers paste ours into the description
         line as often as they put it in a column of its own.
         """
-        words = tokenize(item.description) + [normalize_code(item.code).lower()]
-        if self._index_customer_description:
-            words += tokenize(item.customer_description)
+        words = tokenize(item.customer_description) + [normalize_code(item.code).lower()]
+        if self._index_item_description:
+            words += tokenize(item.description)
         return words
 
     def _idf(self, document_frequency: int) -> float:

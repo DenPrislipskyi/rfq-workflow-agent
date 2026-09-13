@@ -148,15 +148,14 @@ class Settings(BaseSettings):
     # into the same item, never a second answer - a code and a description are
     # two claims, and the shortlist says when they disagree.
     CATALOG_CUSTOMER_CODE_COLUMN: str = ""
-    # How a customer once asked for the same product. Kept on every item -
-    # whatever chooses between candidates should see it - but searched only
-    # when the switch below is on.
+    # How a customer once asked for the same product. This is the column the
+    # search reads: a line of an RFQ is written by a customer, so what it
+    # resembles is another customer's wording, not our shelf description.
     CATALOG_CUSTOMER_DESCRIPTION_COLUMN: str = ""
-    # Measured, not assumed: on a sheet that mentions each product once, adding
-    # these wordings to the index made the ranking worse rather than better,
-    # because customers' wordings of similar products differ by one token.
-    # Turn on and re-run `catalog_recall` once products carry several wordings.
-    CATALOG_INDEX_CUSTOMER_DESCRIPTION: bool = False
+    # Also index our own product description beside the customer wording. Off:
+    # the desk's specification is that a line is matched against the sheet's
+    # customer wording column, and that column alone.
+    CATALOG_INDEX_ITEM_DESCRIPTION: bool = False
     # How many candidates a line of an RFQ is shortlisted down to. This is the
     # ceiling on everything that comes after: a model cannot choose an item it
     # was never shown, so raise it before blaming the model.
@@ -165,11 +164,15 @@ class Settings(BaseSettings):
     # score the same - and every candidate past it is prompt spent on an option
     # nobody picks.
     CATALOG_SHORTLIST: int = 5
-    # Match each line of an RFQ against the catalogue. Two model calls per RFQ,
+    # Match each line of an RFQ against the catalogue. One model call per RFQ,
     # whatever its size. Off leaves reading, forwarding and journalling exactly
     # as they were - nothing downstream depends on a match yet, and the result
     # goes into the record rather than into the form the desk receives.
     MATCHING_ENABLED: bool = True
+    # How much of a restated line has to appear in an item's own customer
+    # wording before the code that named it is taken at its word. Below it the
+    # code is dropped and the catalogue is searched by description instead.
+    MATCHING_AGREEMENT_PERCENT: float = 80.0
 
     # --- Database ------------------------------------------------------------
     # One folder per email, holding what arrived and what we did with it: the
@@ -278,7 +281,7 @@ def _addresses(value: str) -> list[str]:
     """Split a comma-separated setting, tolerating spaces and a trailing comma.
 
     The field stays a plain string because pydantic-settings parses a `list[str]`
-    as JSON, which "a@x.com,b@y.com" is not.
+    as JSON, which "a@example.invalid,b@example.invalid" is not.
     """
     return [item.strip() for item in value.split(",") if item.strip()]
 

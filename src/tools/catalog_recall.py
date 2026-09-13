@@ -136,8 +136,8 @@ def _variants(settings: Settings) -> dict[str, Variant]:
     ours = settings.CATALOG_DESCRIPTION_COLUMN
     theirs = settings.CATALOG_CUSTOMER_DESCRIPTION_COLUMN
     variants = {
-        "our description only": Variant(ours, theirs),
-        "customer wording only": Variant(theirs, ""),
+        "customer wording only": Variant(ours, theirs),
+        "our description only": Variant(theirs, ""),
         BOTH: Variant(ours, theirs, indexed=True),
     }
     if read_cache(settings):
@@ -210,7 +210,7 @@ def _build(rows: list[dict[str, str]], variant: Variant, settings: Settings) -> 
         description_column=variant.description_column,
         customer_description_column=variant.customer_description_column,
         customer_code_column=settings.CATALOG_CUSTOMER_CODE_COLUMN,
-        index_customer_description=variant.indexed,
+        index_item_description=variant.indexed,
     )
 
 

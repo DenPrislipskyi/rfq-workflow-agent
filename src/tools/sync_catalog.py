@@ -61,6 +61,23 @@ def _report_duplicates(catalog: Catalog) -> None:
     codes = Counter(normalize_code(item.code) for item in catalog.items)
     repeated = [(code, count) for code, count in codes.most_common(5) if count > 1]
 
+    # The customer's own code is what a line of an RFQ quotes, and matching is
+    # written for one code naming one product. A code on two products resolves
+    # to whichever row came first, so the sheet is where it gets fixed.
+    theirs = Counter(
+        normalize_code(item.customer_code) for item in catalog.items if item.customer_code
+    )
+    for code, count in theirs.most_common():
+        if count < 2:
+            break
+        items = sorted({one.code for one in catalog.items
+                        if normalize_code(one.customer_code) == code})
+        if len(items) > 1:
+            logger.warning(
+                "Customer code %s names %d different products: %s",
+                code, len(items), ", ".join(items),
+            )
+
     logger.info("%d row(s), %d distinct code(s)", len(catalog), len(codes))
     if not repeated:
         return

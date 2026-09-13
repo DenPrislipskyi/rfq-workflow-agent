@@ -1,48 +1,15 @@
 """What one line of an RFQ looks like on its way through matching."""
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from src.domain.rules.catalog import CatalogItem
 
-# How a line ended up with the product it did. Computed by code from what the
-# model answered, never asked of the model: it is a fact about which route
-# produced the code, and the model does not know which route it was shown.
+# How a line ended up with the product it did, or with none. A fact about
+# which of the three branches produced it, computed where it happened.
 CODE_CONFIRMED = "code_confirmed"
 CODE_REJECTED = "code_rejected"
 BY_SEARCH = "search"
 NOTHING = "none"
-
-
-@dataclass(frozen=True, slots=True)
-class Question:
-    """One line, and everything the catalogue could offer for it."""
-
-    index: int
-    # What we asked the catalogue with: the line restated in our own words.
-    description: str
-    # What the customer actually wrote. Shown to the model as well when it
-    # differs, because a restatement can lose something the original kept.
-    verbatim: str
-    candidates: Sequence[CatalogItem] = ()
-    # The code of the candidate the customer's own code led to, if any.
-    by_code: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class Choice:
-    """What the model said about one line, after it has been checked."""
-
-    item_code: str | None
-    why: str
-    # How sure it was of each candidate, by item code. Only for codes it was
-    # actually shown - a score for anything else is dropped with the answer.
-    scores: dict[str, int] = field(default_factory=dict)
-
-    @property
-    def confidence(self) -> int | None:
-        """How sure it was of the one it picked."""
-        return self.scores.get(self.item_code) if self.item_code else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,8 +37,9 @@ class MatchedLine:
     item: CatalogItem | None = None
     how: str = NOTHING
     why: str = ""
-    # Every product the model was shown for this line, in the order the search
-    # ranked them, each with the score the model gave it.
+    # The shortlist, in the order the search ranked it, each scored against
+    # the best of its own line. Empty for a confirmed code: there was nothing
+    # to choose between.
     candidates: list["ScoredItem"] = field(default_factory=list)
     confidence: int | None = None
 
