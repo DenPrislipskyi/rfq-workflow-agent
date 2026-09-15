@@ -9,8 +9,8 @@ otherwise identical sentence.
 from src.domain.rules.catalog import Catalog, CatalogItem, normalize_code, tokenize
 
 # Two columns per row, and the difference between them is the point. Ours is
-# what the table shows for a product; the customer's is what the search reads,
-# because a line of an RFQ is written by a customer.
+# what the search reads; the customer's is one half of the question of whether
+# the row maps what it says it maps, and the query when the answer is no.
 ROWS = [
     {"Item Code": "T69128400", "Item Description": "HEX HEAD BOLT/NUT STEEL UNGALV, M16 X 65MM",
      "Customer Description": "Hexagon Head Bolts Full Threaded (Bolt with Nut) M16*65"},
@@ -120,8 +120,8 @@ def test_a_description_in_another_script_survives_normalization():
         [
             {
                 "Item Code": "T1",
-                "Item Description": "ROPE",
-                "Customer Description": "(주)씨웨이글로벌 ROPE",
+                "Item Description": "(주)씨웨이글로벌 ROPE",
+                "Customer Description": "rope",
             }
         ]
     )
@@ -177,24 +177,26 @@ def _with_wording(*, indexed: bool) -> Catalog:
         code_column="Item Code",
         description_column="Item Description",
         customer_description_column="Customer Description",
-        index_item_description=indexed,
+        index_customer_description=indexed,
     )
 
 
-def test_the_customer_s_wording_is_what_the_search_reads():
-    """A line of an RFQ is written by a customer, so what it resembles is how
-    a customer asked for the same thing before."""
-    assert _with_wording(indexed=False).search("sanitiser gel")[0].item.code == "T55029103"
+def test_our_own_wording_is_what_the_search_reads():
+    """The sheet mentions a product's customer wording once. Index that instead
+    and a row can be found by exactly the one sentence already in it and by
+    nothing else - measured at 2.4% against 97.6% for this column."""
+    found = _with_wording(indexed=False).search("hand wash dettol pump bottle")
+
+    assert found[0].item.code == "T55029103"
     assert _with_wording(indexed=False).items[0].customer_description == "sanitiser gel"
 
 
-def test_our_own_wording_is_searched_only_when_that_is_switched_on():
-    """Off by default: the desk's specification is that a line is matched
-    against the sheet's customer wording column, and that column alone."""
-    assert _with_wording(indexed=False).search("hand wash dettol pump bottle") == []
-    assert _with_wording(indexed=True).search("hand wash dettol pump bottle")[0].item.code == (
-        "T55029103"
-    )
+def test_the_customer_s_wording_is_searched_only_when_that_is_switched_on():
+    """Off by default. It is kept on the item either way, because the matching
+    pipeline reads it: it is what a row is judged on, and what the sheet is
+    searched with once a quoted code has been overruled."""
+    assert _with_wording(indexed=False).search("sanitiser gel") == []
+    assert _with_wording(indexed=True).search("sanitiser gel")[0].item.code == "T55029103"
 
 
 def test_the_shortlist_is_as_long_as_it_was_asked_to_be():
@@ -222,31 +224,27 @@ def test_the_code_leads_the_shortlist_and_the_words_confirm_it():
     assert shortlist.conflicted is False
 
 
-def test_a_code_whose_customer_wording_says_something_else_is_flagged():
-    """A code is confirmed by the wording the sheet files it under, so what
-    contradicts it is a line that wording does not answer."""
-    shortlist = catalog().shortlist(code="T69128400", description="Convex rulers steel 5m")
+def test_a_code_whose_wording_says_something_else_is_flagged():
+    """A code is confirmed by the description the sheet files it under, so what
+    contradicts it is a line that description does not answer."""
+    shortlist = catalog().shortlist(code="T69128400", description="Convex rulers metric")
 
     assert shortlist.by_code is not None
     assert shortlist.confirmed is False
     assert shortlist.conflicted is True
 
 
-def test_the_desks_negative_mapping_is_no_longer_visible_here():
+def test_the_desks_negative_mapping_shows_up_as_a_conflict():
     """Row 110188 is the desk's own example of a mapping that went wrong: the
     customer asked for a hard drive and the item the code names is a fishing
-    rod. Searching the customer wording column cannot see that, because that
-    column is the customer's request - it agrees with the customer by
-    construction. Matching this code now returns the fishing rod.
-
-    Kept as a test rather than left implicit: it is a consequence of the
-    specification, and it should fail loudly if the specification changes."""
+    rod. Searching our own description column sees it - the words of the
+    request find nothing like the item the code leads to."""
     shortlist = catalog().shortlist(code="T11018800", description="EXTERNAL HDD 4TB")
 
     assert shortlist.by_code is not None
     assert shortlist.by_code.description == "ROD FISHING WITH FURTHER, DETAILS"
-    assert shortlist.confirmed is True
-    assert shortlist.conflicted is False
+    assert shortlist.confirmed is False
+    assert shortlist.conflicted is True
 
 
 def test_a_line_with_no_code_is_ranked_on_its_words_alone():
@@ -296,3 +294,57 @@ def test_an_item_knows_what_it_is_without_the_catalogue():
     item = CatalogItem(code="T1", description="WIRE ROPE")
 
     assert item.fields == {}
+
+
+# --- a word the index has never seen --------------------------------------
+
+
+def _misspelt() -> Catalog:
+    return catalog(
+        [
+            {"Item Code": "T1", "Item Description": "SUGAR, WHITE, GRANULATED 2 KGS"},
+            {"Item Code": "T2", "Item Description": "CHEESE, SLICED 200 GRM KRAFT"},
+            {"Item Code": "T3", "Item Description": "HEX HEAD BOLT/NUT STEEL M16 X 65MM"},
+            {"Item Code": "T4", "Item Description": "HEX HEAD BOLT/NUT STEEL M18 X 65MM"},
+        ]
+    )
+
+
+def test_a_misspelt_word_still_finds_the_product():
+    """`SUGER` shares no token at all with `SUGAR`, so without this the query
+    scores zero against everything and the product is not found - not ranked
+    lower, absent."""
+    assert _misspelt().search("SUGER")[0].item.code == "T1"
+    assert _misspelt().search("CHESSE")[0].item.code == "T2"
+
+
+def test_a_size_is_never_repaired_into_another_size():
+    """`M16` and `M18` are also one edit apart, and they are different bolts.
+    Anything with a digit in it is what a line is identified by, and nothing
+    here may touch it."""
+    assert _misspelt().search("M17") == []
+
+
+def test_a_word_two_products_could_have_meant_is_not_guessed_at():
+    """One reading is a repair; two is a guess, and guessing between them is
+    how the wrong product gets ordered quietly."""
+    both = catalog(
+        [
+            {"Item Code": "T1", "Item Description": "PAINT BRUSH"},
+            {"Item Code": "T2", "Item Description": "PAINT ROLLER"},
+            {"Item Code": "T3", "Item Description": "PRINT CARTRIDGE"},
+        ]
+    )
+
+    assert both.search("POINT") == []
+
+
+def test_a_word_spelled_right_outranks_one_we_decided_was_meant():
+    ranked = _misspelt().search("SUGER CHEESE")
+
+    assert [candidate.item.code for candidate in ranked][0] == "T2"
+
+
+def test_a_short_word_is_left_alone():
+    """One edit is most of a short word, and the sheet is full of them."""
+    assert _misspelt().search("KEGS") == []
