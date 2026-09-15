@@ -24,6 +24,7 @@ maps field by field rather than serving these files as they are.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -163,6 +164,14 @@ class RecordedMatch(BaseModel):
     # against the list it was chosen from, and a refusal only means something
     # beside what it refused.
     candidates: list[RecordedCandidate] = Field(default_factory=list)
+    # What a supplier quoted for one unit of this line. `None` until one of
+    # them answers, and `None` again when the answer is withdrawn: a line
+    # nobody has priced and a line whose price was taken back are one state.
+    #
+    # Per unit rather than per line, because that is what a supplier quotes -
+    # the quantity is ours, and multiplying here would bake our own arithmetic
+    # into what they actually said.
+    offer_unit_price: float | None = None
     # The product a person settled on, and the only thing on this line they
     # said rather than the agent. `None` is the whole of "nobody has confirmed
     # this line" - there is no second flag to disagree with it - and the value
@@ -186,6 +195,14 @@ class EmailRecord(BaseModel):
     """Everything known about one email, in one file."""
 
     id: str
+    # The desk's own number for this RFQ - `RFQ-0042`. `None` for an
+    # email that is not one, which is one in five of them.
+    #
+    # Separate from `id` on purpose: `id` addresses a record the moment it
+    # is opened, whatever the email turns out to be, while this is issued
+    # only once the verdict says RFQ - and it is the one a customer and a
+    # supplier quote back.
+    rfq_reference: str | None = None
     # Ties this folder to `data/decisions.jsonl` and to the filled workbook,
     # both of which are named after the decision.
     decision_id: str | None = None
@@ -313,8 +330,11 @@ class EmailRecords:
 
         try:
             async with self._lock:
-                folder = self._make_folder(_record_id(email.received_at or now, decision_id))
+                when = email.received_at or now
+                folder = self._make_folder(_record_id(when, decision_id))
                 record.id = folder.name
+                if _is_rfq(outcome):
+                    record.rfq_reference = _reference(_take_number(self._root))
                 if email.body_text:
                     (folder / BODY).write_text(email.body_text, encoding="utf-8")
                 _write(folder / RECORD, record)
@@ -384,6 +404,20 @@ class EmailRecords:
 
     async def confirm(self, record_id: str, index: int, item_code: str | None) -> bool:
         """Settle one line on a product, or unsettle it. True when it took."""
+        return await self._set(record_id, index, "confirmed_item_code", item_code)
+
+    async def price(self, record_id: str, index: int, unit_price: float | None) -> bool:
+        """Record what a supplier quoted for one unit of a line."""
+        return await self._set(record_id, index, "offer_unit_price", unit_price)
+
+    async def _set(self, record_id: str, index: int, field: str, value: object) -> bool:
+        """Set one field of one line, and say whether there was a line to set.
+
+        The two writes a person makes on the matching screen differ in one
+        word each - which field, and what goes in it - so they are one method
+        with the difference passed in, rather than two bodies that have to be
+        kept identical.
+        """
         if not self._enabled:
             return False
 
@@ -398,11 +432,11 @@ class EmailRecords:
                 if line is None:
                     return False
 
-                line.confirmed_item_code = item_code
+                setattr(line, field, value)
                 record.updated_at = _now()
                 _write(folder / RECORD, record)
         except Exception:
-            logger.exception("Could not confirm line %d of %s", index, record_id)
+            logger.exception("Could not set %s on line %d of %s", field, index, record_id)
             return False
 
         self._changes.announce()
@@ -586,6 +620,57 @@ def _record_id(when: datetime, decision_id: str | None) -> str:
     stamp = when.astimezone(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     tail = (decision_id or str(uuid4())).split("-")[0][:8]
     return f"{stamp}__{tail}"
+
+
+# The desk's own number for an RFQ, and the only identifier a customer or a
+# supplier is ever shown.
+#
+# It runs on rather than restarting each January, and that is what lets the
+# year stay out of it: a number that restarts needs the year to tell two of
+# itself apart, and then every RFQ carries four digits that are the same for
+# everyone all year.
+REFERENCE = "RFQ-{number:04d}"
+# Where the folder store keeps its count. A file rather than a scan of the
+# records: a number already sent to a supplier may not move because somebody
+# deleted the record beside it, and counting what is left would move it.
+COUNTER = ".rfq-counter.json"
+# The one key in that file. Named rather than positional so the file still
+# reads as something when a person opens it.
+ISSUED = "issued"
+
+
+def _reference(number: int) -> str:
+    return REFERENCE.format(number=number)
+
+
+def _take_number(root: Path) -> int:
+    """The next RFQ number, and it is now taken.
+
+    Written before it is used rather than after: a number handed out twice
+    is two RFQs a customer cannot tell apart, while a number burnt by a
+    write that then failed is a gap nobody ever notices.
+    """
+    path = root / COUNTER
+    counter: dict[str, int] = {}
+    if path.is_file():
+        try:
+            counter = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.exception("Could not read %s - numbering starts again", path)
+
+    number = int(counter.get(ISSUED, 0)) + 1
+    path.write_text(json.dumps({ISSUED: number}, indent=2), encoding="utf-8")
+    return number
+
+
+def _is_rfq(outcome: ClassificationOutcome | None) -> bool:
+    """Whether this email earns an RFQ number.
+
+    Only an RFQ gets one. Four emails in five are one, and the fifth is a
+    supplier's reply, a portal notice or a marketing blast - numbering those
+    would put gaps in the only sequence a customer ever counts.
+    """
+    return outcome is not None and outcome.result.is_rfq
 
 
 def _safe_name(name: str) -> str:

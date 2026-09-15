@@ -22,7 +22,16 @@ from pathlib import Path
 
 import pytest
 
-from src.domain.models import EmailAddress, NormalizedEmail
+from src.domain.enums import DecisionPath, Direction, EmailCategory, Priority, RecommendedAction
+from src.domain.models import (
+    ClassificationOutcome,
+    ClassificationResult,
+    EmailAddress,
+    Hints,
+    NormalizedEmail,
+    Signals,
+    SplitThread,
+)
 from src.infrastructure.blobs import FolderBlobs
 from src.infrastructure.documents import SourceFile
 from src.infrastructure.storage.database import DatabaseRecords
@@ -83,6 +92,29 @@ def email(**overrides) -> NormalizedEmail:
         received_at=datetime(2026, 9, 13, 17, 3, 3, tzinfo=UTC),
         attachments=[],
         **overrides,
+    )
+
+
+def outcome(*, is_rfq: bool = True) -> ClassificationOutcome:
+    """A verdict, which is what decides whether an email earns an RFQ number."""
+    return ClassificationOutcome(
+        result=ClassificationResult(
+            category=EmailCategory.NEW_RFQ if is_rfq else EmailCategory.SPAM_MARKETING,
+            direction=Direction.INBOUND_CUSTOMER,
+            requires_action=is_rfq,
+            is_rfq=is_rfq,
+            recommended_action=RecommendedAction.FORWARD_TO_DST,
+            confidence=0.95,
+            needs_human_review=False,
+            priority=Priority.NORMAL,
+            decision_path=DecisionPath.LLM,
+            reasoning="The customer asks the chandler to quote an attached requisition.",
+            evidence=["'Please quote the attached.'"],
+            extracted=Signals(vessel_name="MV WESTERN STAR"),
+        ),
+        thread=SplitThread(latest_message="Please quote the attached."),
+        hints=Hints(),
+        model="gpt-5.6-luna",
     )
 
 
@@ -164,6 +196,10 @@ async def store(request, tmp_path: Path):
         # this is supposed to be testing against.
         async with engine.begin() as connection:
             await connection.execute(text("TRUNCATE emails CASCADE"))
+            # The sequence too: it is not hanging off an email, so TRUNCATE
+            # does not reach it, and a test expecting RFQ-0001 would otherwise
+            # get whatever number the test before it left behind.
+            await connection.execute(text("ALTER SEQUENCE rfq_reference_seq RESTART WITH 1"))
         yield DatabaseRecords(sessions, FolderBlobs(tmp_path / "blobs"), enabled=True)
     finally:
         await engine.dispose()
@@ -401,3 +437,108 @@ async def test_a_line_that_is_not_there_cannot_be_settled(store):
 
 async def test_a_record_that_is_not_there_cannot_be_settled(store):
     assert await store.confirm("no-such-record", 1, "T65082300") is False
+
+
+async def test_an_rfq_is_given_the_desk_s_own_number(store):
+    """The number a customer and a supplier quote back. Separate from the
+    record id, which addresses the record and is nobody's to read out loud."""
+    record_id = await store.open(
+        email=email(), outcome=outcome(), decision_id="aaaaaaaa", source="outlook"
+    )
+    record = await store.read(record_id)
+
+    assert record is not None
+    assert record.rfq_reference == "RFQ-0001"
+    assert record.id != record.rfq_reference
+
+
+async def test_the_numbers_run_on_rather_than_repeat(store):
+    first = await store.open(
+        email=email(message_id="one"), outcome=outcome(), decision_id="aaaaaaaa", source="outlook"
+    )
+    second = await store.open(
+        email=email(message_id="two"), outcome=outcome(), decision_id="bbbbbbbb", source="outlook"
+    )
+
+    numbers = [(await store.read(one)).rfq_reference for one in (first, second)]
+    assert numbers == ["RFQ-0001", "RFQ-0002"]
+
+
+async def test_only_an_rfq_is_numbered(store):
+    """Four emails in five are an RFQ; the fifth is a supplier's reply, a
+    portal notice or a marketing blast. Numbering those would put gaps in the
+    only sequence a customer ever counts."""
+    blast = await store.open(
+        email=email(message_id="one"),
+        outcome=outcome(is_rfq=False),
+        decision_id="aaaaaaaa",
+        source="outlook",
+    )
+    assert (await store.read(blast)).rfq_reference is None
+
+    # And the next real RFQ still gets the first number, not the second.
+    rfq = await store.open(
+        email=email(message_id="two"), outcome=outcome(), decision_id="bbbbbbbb", source="outlook"
+    )
+    assert (await store.read(rfq)).rfq_reference == "RFQ-0001"
+
+
+async def test_an_email_nobody_could_classify_is_not_numbered(store):
+    """Classification is what failed, so there is no verdict to say RFQ."""
+    nothing = await store.open(
+        email=email(), outcome=None, decision_id=None, source="outlook"
+    )
+
+    assert (await store.read(nothing)).rfq_reference is None
+
+
+async def test_a_line_starts_with_nobody_having_quoted_it(store):
+    record_id = await _with_lines(store)
+
+    assert (await _line(store, record_id, 1)).offer_unit_price is None
+
+
+async def test_a_line_keeps_what_a_supplier_quoted_for_one_unit(store):
+    record_id = await _with_lines(store)
+
+    assert await store.price(record_id, 1, 24.5) is True
+    assert (await _line(store, record_id, 1)).offer_unit_price == 24.5
+
+
+async def test_a_withdrawn_offer_leaves_the_line_unpriced(store):
+    """Not a third state: an offer taken back and an offer never made are
+    the same thing to everyone downstream of this."""
+    record_id = await _with_lines(store)
+    await store.price(record_id, 1, 24.5)
+
+    assert await store.price(record_id, 1, None) is True
+    assert (await _line(store, record_id, 1)).offer_unit_price is None
+
+
+async def test_pricing_one_line_leaves_the_others_alone(store):
+    record_id = await _with_lines(store)
+
+    await store.price(record_id, 1, 24.5)
+
+    assert (await _line(store, record_id, 2)).offer_unit_price is None
+
+
+async def test_a_price_and_a_product_are_kept_apart(store):
+    """Two different people decide them, and neither write may disturb the other."""
+    record_id = await _with_lines(store)
+
+    await store.confirm(record_id, 1, "T65082300")
+    await store.price(record_id, 1, 24.5)
+
+    line = await _line(store, record_id, 1)
+    assert (line.confirmed_item_code, line.offer_unit_price) == ("T65082300", 24.5)
+
+
+async def test_a_line_that_is_not_there_cannot_be_priced(store):
+    record_id = await _with_lines(store)
+
+    assert await store.price(record_id, 99, 24.5) is False
+
+
+async def test_a_record_that_is_not_there_cannot_be_priced(store):
+    assert await store.price("no-such-record", 1, 24.5) is False

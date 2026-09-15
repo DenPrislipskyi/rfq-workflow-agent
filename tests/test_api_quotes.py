@@ -51,10 +51,29 @@ BODY = "Dear Sir/Madam, you may find attached our RFQ for Engine Materials."
 
 # The three products the confirmation tests are allowed to settle on. A code
 # outside this sheet is a code nobody sells, and the endpoint has to refuse it.
+#
+# `Supplier` and `Price` are here because they are what the sheet is edited
+# for: they are the columns that move between the day a line was matched and
+# the day somebody settles it.
 SHEET = [
-    {"Item Code": "T69128400", "Item Description": "HEX HEAD BOLT/NUT, M16 X 65MM"},
-    {"Item Code": "T69133100", "Item Description": "HEX HEAD BOLT/NUT, M20 X 80MM"},
-    {"Item Code": "T85116300", "Item Description": "WELDER GLOVES FIVE FINGERS"},
+    {
+        "Item Code": "T69128400",
+        "Item Description": "HEX HEAD BOLT/NUT, M16 X 65MM",
+        "Price": "0.51",
+        "Supplier": "Northgate Marine Fasteners Ltd.",
+    },
+    {
+        "Item Code": "T69133100",
+        "Item Description": "HEX HEAD BOLT/NUT, M20 X 80MM",
+        "Price": "0.88",
+        "Supplier": "Northgate Marine Fasteners Ltd.",
+    },
+    {
+        "Item Code": "T85116300",
+        "Item Description": "WELDER GLOVES FIVE FINGERS",
+        "Price": "4.10",
+        "Supplier": "Harbour Safety Equipment Co.",
+    },
 ]
 
 
@@ -203,6 +222,26 @@ async def test_the_list_is_rfqs_and_not_the_rest_of_the_mailbox(tmp_path: Path):
     assert body["items"][0]["status"] == "inProgress"
 
 
+async def test_a_row_counts_the_lines_its_matching_screen_will_show(tmp_path: Path):
+    """The same number the page prints as "3 of 3 line(s) matched", so the list
+    and the screen behind it never disagree about how big the RFQ is."""
+    records, record_id = await one_rfq(tmp_path)
+    await records.update(
+        record_id,
+        matching=[RecordedMatch(index=1, verbatim="bolts"), RecordedMatch(index=2, verbatim="rope")],
+    )
+
+    assert client(records).get(URL).json()["items"][0]["lineCount"] == 2
+
+
+async def test_an_rfq_nobody_matched_counts_no_lines(tmp_path: Path):
+    """Zero rather than null: this is an RFQ the agent read, and its matching
+    screen really does have nothing on it."""
+    records, _ = await one_rfq(tmp_path)
+
+    assert client(records).get(URL).json()["items"][0]["lineCount"] == 0
+
+
 async def test_an_urgent_email_carries_its_priority(tmp_path: Path):
     records, _ = await one_rfq(tmp_path, priority=Priority.URGENT)
 
@@ -294,7 +333,12 @@ async def test_an_rfq_reads_as_its_lines(tmp_path: Path):
     # Every candidate, scored - a refusal only means something beside what it
     # refused, and this is what the review panel reads.
     assert [one["confidence"] for one in line["candidates"]] == [98, 20]
-    assert line["item"]["Price"] == "0.42"
+    # The whole row of the sheet, as the sheet has it **now** - not the copy
+    # the record took when it matched this line. The supplier and the price are
+    # edited in the sheet, and a screen somebody settles a line from may not
+    # show last month's copy of them.
+    assert line["item"]["Price"] == "0.51", "0.42 is what the record kept"
+    assert line["item"]["Supplier"] == "Northgate Marine Fasteners Ltd."
 
 
 async def _rfq_with_a_shortlist(tmp_path: Path):
@@ -484,6 +528,109 @@ async def test_a_settled_candidate_keeps_the_score_it_was_shortlisted_with(tmp_p
     line = page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]
 
     assert (line["itemCode"], line["confidence"]) == ("T69133100", 78)
+
+
+async def test_every_candidate_carries_the_sheet_s_row_as_it_stands_today(tmp_path: Path):
+    """A candidate is a product somebody is about to choose between, so it is
+    shown as the sheet has it now - which is where the supplier lives."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    line = client(records).get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+
+    assert [one["item"]["Supplier"] for one in line["candidates"]] == [
+        "Northgate Marine Fasteners Ltd.",
+        "Northgate Marine Fasteners Ltd.",
+    ]
+
+
+async def test_a_product_the_sheet_has_dropped_keeps_the_row_the_record_kept(tmp_path: Path):
+    """Fewer columns beats a candidate that goes blank: a code the sheet no
+    longer carries is shown as the record last saw it."""
+    records, record_id = await one_rfq(tmp_path)
+    await records.update(
+        record_id,
+        matching=[
+            RecordedMatch(
+                index=1,
+                verbatim="turbocharger cartridge NR34/S",
+                how="search",
+                candidates=[
+                    RecordedCandidate(
+                        item_code="T00000000",
+                        confidence=40,
+                        item={"Item Code": "T00000000", "Supplier": "A firm we no longer list"},
+                    )
+                ],
+            )
+        ],
+    )
+
+    line = client(records).get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+
+    assert line["candidates"][0]["item"]["Supplier"] == "A firm we no longer list"
+
+
+def _offer(record_id: str, index: int) -> str:
+    return f"{URL}/{record_id}/rfq/lines/{index}/offer"
+
+
+async def test_a_line_carries_what_a_supplier_quoted_for_one_unit(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    assert page.put(_offer(record_id, 7), json={"unitPrice": 24.5}).status_code == 204
+
+    line = page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+    assert line["offerUnitPrice"] == 24.5
+
+
+async def test_a_line_nobody_quoted_carries_no_price_rather_than_zero(tmp_path: Path):
+    """Zero is a price somebody named. Null is nobody having answered, and the
+    pricing screen may not read the second as the first."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    line = client(records).get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+
+    assert line["offerUnitPrice"] is None
+
+
+async def test_a_withdrawn_offer_leaves_the_line_unpriced(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+    page.put(_offer(record_id, 7), json={"unitPrice": 24.5})
+
+    assert page.delete(_offer(record_id, 7)).status_code == 204
+    assert page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]["offerUnitPrice"] is None
+
+
+async def test_a_price_no_supplier_could_have_named_is_refused(tmp_path: Path):
+    """Both ends of it. A zero would read as "free" on the pricing screen, and
+    a typo with four extra digits as a quotation somebody has to explain."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    assert page.put(_offer(record_id, 7), json={"unitPrice": 0}).status_code == 422
+    assert page.put(_offer(record_id, 7), json={"unitPrice": -1}).status_code == 422
+    assert page.put(_offer(record_id, 7), json={"unitPrice": 1e12}).status_code == 422
+    assert page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]["offerUnitPrice"] is None
+
+
+async def test_a_line_nobody_has_cannot_be_priced(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    assert client(records).put(_offer(record_id, 99), json={"unitPrice": 24.5}).status_code == 404
+
+
+async def test_a_price_and_a_confirmation_do_not_disturb_each_other(tmp_path: Path):
+    """Two separate decisions on one line: which product, and what it costs."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    page.put(_confirmation(record_id, 7), json={"itemCode": "T69133100"})
+    page.put(_offer(record_id, 7), json={"unitPrice": 24.5})
+
+    line = page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+    assert (line["confirmedItemCode"], line["offerUnitPrice"]) == ("T69133100", 24.5)
 
 
 async def test_an_unsettled_line_still_shows_what_the_agent_found(tmp_path: Path):

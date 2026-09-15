@@ -28,7 +28,7 @@ import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, text as sql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -61,7 +61,9 @@ from src.infrastructure.storage.records import (
     RecordedMatch,
     RecordedVerdict,
     _address,
+    _is_rfq,
     _record_id,
+    _reference,
     _safe_name,
     _unique,
     _verdict,
@@ -119,7 +121,8 @@ class DatabaseRecords:
             return None
 
         now = datetime.now(UTC)
-        record_id = _record_id(email.received_at or now, decision_id)
+        when = email.received_at or now
+        record_id = _record_id(when, decision_id)
 
         try:
             # The body first: a row that says `body_key` and no blob behind it
@@ -132,9 +135,16 @@ class DatabaseRecords:
                 )
 
             async with self._sessions() as session, session.begin():
+                # In the same transaction as the row: a number taken for a
+                # record that then failed to write is a gap in the sequence
+                # somebody would go looking for.
+                reference = (
+                    _reference(await _take_number(session)) if _is_rfq(outcome) else None
+                )
                 session.add(
                     Email(
                         id=record_id,
+                        rfq_reference=reference,
                         decision_id=decision_id,
                         message_id=email.message_id,
                         source=source,
@@ -216,6 +226,20 @@ class DatabaseRecords:
 
     async def confirm(self, record_id: str, index: int, item_code: str | None) -> bool:
         """Settle one line on a product, or unsettle it. True when it took."""
+        return await self._set(record_id, index, "confirmed_item_code", item_code)
+
+    async def price(self, record_id: str, index: int, unit_price: float | None) -> bool:
+        """Record what a supplier quoted for one unit of a line."""
+        return await self._set(record_id, index, "offer_unit_price", unit_price)
+
+    async def _set(self, record_id: str, index: int, field: str, value: object) -> bool:
+        """Set one field of one line, and say whether there was a line to set.
+
+        The two writes a person makes on the matching screen differ in one
+        word each - which field, and what goes in it - so they are one method
+        with the difference passed in, rather than two bodies that have to be
+        kept identical.
+        """
         if not self._enabled:
             return False
 
@@ -229,9 +253,9 @@ class DatabaseRecords:
                 if line is None:
                     return False
 
-                line.confirmed_item_code = item_code
+                setattr(line, field, value)
         except Exception:
-            logger.exception("Could not confirm line %d of %s", index, record_id)
+            logger.exception("Could not set %s on line %d of %s", field, index, record_id)
             return False
 
         self._changes.announce()
@@ -369,6 +393,17 @@ def _delivery_row(delivery: RecordedDelivery) -> EmailDelivery:
     return EmailDelivery(**delivery.model_dump())
 
 
+async def _take_number(session: AsyncSession) -> int:
+    """The next RFQ number, and it is now taken.
+
+    A sequence rather than a row somebody reads and adds one to: two emails
+    arriving together would read the same count, and one number on two RFQs
+    is two RFQs a customer cannot tell apart.
+    """
+    statement = sql("SELECT nextval('rfq_reference_seq')")
+    return (await session.execute(statement)).scalar_one()
+
+
 async def _replace_lines(
     session: AsyncSession, row: Email, matching: Sequence[RecordedMatch]
 ) -> None:
@@ -400,6 +435,7 @@ async def _replace_lines(
             how=line.how,
             why=line.why,
             confirmed_item_code=line.confirmed_item_code,
+            offer_unit_price=line.offer_unit_price,
             candidates=[
                 RfqLineCandidate(
                     rank=rank,
@@ -425,6 +461,7 @@ def _record(row: Email) -> EmailRecord:
 
     return EmailRecord(
         id=row.id,
+        rfq_reference=row.rfq_reference,
         decision_id=row.decision_id,
         message_id=row.message_id,
         source=row.source,
@@ -483,6 +520,9 @@ def _line(row: RfqLine) -> RecordedMatch:
         how=row.how,
         why=row.why,
         confirmed_item_code=row.confirmed_item_code,
+        # Decimal out of Postgres, float on the model: the wire and the screen
+        # both speak JSON, and a Decimal has nowhere to land in either.
+        offer_unit_price=float(row.offer_unit_price) if row.offer_unit_price is not None else None,
         candidates=[
             RecordedCandidate(
                 item_code=one.item_code,

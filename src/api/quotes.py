@@ -16,7 +16,7 @@ read - is in the record, one line away from being shown.
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/quotes", tags=["Quotes"])
 
 MAX_PAGE_SIZE = 500
+
+# The most a single unit may be quoted at. Not a business rule - a guard
+# against a number nobody meant to type.
+MOST_A_UNIT_COSTS = 10_000_000.0
 
 # How long the stream stays silent before it says something anyway. Proxies and
 # load balancers close a connection that has sent nothing for a minute or two,
@@ -104,6 +108,11 @@ class QuoteRow(Wire):
     # own, for the day these are filled in.
     counts: dict[str, int] | None = None
     completion_percent: int | None = None
+    # How many lines the matching screen has for this RFQ - the rows of its
+    # Product matching table, and nothing else. Separate from `counts`, which
+    # wants a breakdown by priced, in stock and variants: the agent knows none
+    # of those, and a breakdown of zeroes reads as work already done.
+    line_count: int = 0
 
 
 class QuotePage(Wire):
@@ -233,6 +242,10 @@ class MatchRow(Wire):
     # The product a person settled on. Empty until somebody does - and empty
     # again once they change their mind, because those are one state.
     confirmed_item_code: str = ""
+    # What a supplier quoted for one unit of this line. Null until one of them
+    # answers; the quantity is the customer's, and the total is the screen's
+    # arithmetic rather than anything a supplier said.
+    offer_unit_price: float | None = None
 
 
 class Confirmation(Wire):
@@ -241,10 +254,27 @@ class Confirmation(Wire):
     item_code: str
 
 
+class Offer(Wire):
+    """What a supplier quoted for one unit of this line.
+
+    Greater than zero, and no larger than a price anybody would put in a
+    quotation. Both bounds are here rather than in the store because this is
+    where a number arrives from outside: a zero would read as "free" on the
+    pricing screen, and a typo with four extra digits would read as a quotation
+    somebody has to explain.
+    """
+
+    unit_price: float = Field(gt=0, le=MOST_A_UNIT_COSTS)
+
+
 class RfqDetail(Wire):
     """One RFQ as its own page reads it."""
 
     id: str
+    # The desk's own number - `RFQ-0042`. Empty for a record opened before
+    # numbering existed; the page then shows a dash rather than the id, which
+    # addresses the record and was never meant to be read out loud.
+    reference: str = ""
     customer_name: str = ""
     vessel_name: str = ""
     imo: str = ""
@@ -268,6 +298,7 @@ async def read_rfq(record_id: str, records: RecordsDep, catalog: CatalogDep) -> 
 
     return RfqDetail(
         id=record.id,
+        reference=record.rfq_reference or "",
         customer_name=_who(record),
         vessel_name=_header(record, VESSEL),
         imo=_header(record, IMO),
@@ -310,6 +341,27 @@ async def confirm_line(
 async def unconfirm_line(record_id: str, index: int, records: RecordsDep) -> Response:
     """Un-settle one line. Idempotent: clearing what is already clear is fine."""
     if not await records.confirm(record_id, index, None):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such line")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/{record_id}/rfq/lines/{index}/offer", status_code=status.HTTP_204_NO_CONTENT)
+async def price_line(record_id: str, index: int, body: Offer, records: RecordsDep) -> Response:
+    """Record what a supplier quoted for one unit of this line.
+
+    No check against the sheet, unlike a confirmation: a price is the
+    supplier's to name, and ours to believe or not. The only thing refused
+    here is a number that cannot be one.
+    """
+    if not await records.price(record_id, index, body.unit_price):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such line")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/{record_id}/rfq/lines/{index}/offer", status_code=status.HTTP_204_NO_CONTENT)
+async def unprice_line(record_id: str, index: int, records: RecordsDep) -> Response:
+    """Forget a supplier's price. Idempotent: clearing what is clear is fine."""
+    if not await records.price(record_id, index, None):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such line")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -365,11 +417,13 @@ def _row(record: EmailRecord) -> QuoteRow:
         # the agent has read, and there is something to show for each of them.
         id=record.id,
         row_key=record.id,
+        reference=record.rfq_reference or "",
         labels=list(record.labels),
         status=_status(record),
         customer_name=_who(record),
         vessel_name=_header(record, VESSEL),
         priority=_priority(record),
+        line_count=len(record.matching),
     )
 
 
@@ -388,8 +442,29 @@ def _line(number: int, match: RecordedMatch, catalog: Catalog) -> MatchRow:
     """
     settled = _settled(match, catalog)
     if settled is not None:
-        return _showing(_unsettled(number, match), settled, match)
-    return _unsettled(number, match)
+        return _showing(_unsettled(number, match, catalog), settled, match)
+    return _unsettled(number, match, catalog)
+
+
+def _fields(catalog: Catalog, code: str, recorded: Mapping[str, Any]) -> dict[str, Any]:
+    """One product's row of the sheet, as the sheet has it now.
+
+    The record keeps the row it matched against, and that is the right copy for
+    explaining a decision taken last month. It is the wrong one for a screen
+    somebody is about to settle a line from: the supplier, the source and the
+    unit are edited in the sheet, and last month's copy of them describes
+    something nobody sells today.
+
+    The recorded row is the fallback, for a code the sheet no longer carries.
+    Fewer columns beats a candidate that goes blank.
+    """
+    found = catalog.by_code(code) if code else None
+    # `by_code` answers to a customer's code as well as to ours, and a customer
+    # code that happens to be somebody else's product would quietly swap the
+    # row. Only our own code may replace it.
+    if found is None or normalize_code(found.code) != normalize_code(code):
+        return dict(recorded)
+    return dict(found.fields)
 
 
 def _settled(match: RecordedMatch, catalog: Catalog) -> CatalogItem | None:
@@ -420,7 +495,7 @@ def _showing(row: MatchRow, product: CatalogItem, match: RecordedMatch) -> Match
     )
 
 
-def _unsettled(number: int, match: RecordedMatch) -> MatchRow:
+def _unsettled(number: int, match: RecordedMatch, catalog: Catalog) -> MatchRow:
     return MatchRow(
         line=number,
         index=match.index,
@@ -430,17 +505,18 @@ def _unsettled(number: int, match: RecordedMatch) -> MatchRow:
         uom=match.uom or "",
         item_code=match.item_code or "",
         item_description=match.item_description,
-        item=dict(match.item),
+        item=_fields(catalog, match.item_code or "", match.item),
         confidence=match.confidence,
         how=match.how,
         why=match.why,
         confirmed_item_code=match.confirmed_item_code or "",
+        offer_unit_price=match.offer_unit_price,
         candidates=[
             MatchCandidate(
                 item_code=one.item_code,
                 description=one.description,
                 confidence=one.confidence,
-                item=dict(one.item),
+                item=_fields(catalog, one.item_code, one.item),
             )
             for one in match.candidates
         ],

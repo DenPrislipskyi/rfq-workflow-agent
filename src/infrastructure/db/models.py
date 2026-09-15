@@ -31,6 +31,7 @@ lose the column somebody needs in March.
 """
 
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 
 from sqlalchemy import (
@@ -38,6 +39,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     Float,
+    Numeric,
     ForeignKey,
     Index,
     Integer,
@@ -75,6 +77,20 @@ class Email(Base):
     # primary key rather than swapped for a serial, because it is already in
     # every URL the front end holds and in every folder name on disk.
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    # The desk's own number for this RFQ - `RFQ-0042`. Null for an email
+    # that is not one, which is one in five of them.
+    #
+    # Not the primary key, and deliberately: `id` addresses a record the moment
+    # it is opened, whatever the email turns out to be, while this is issued
+    # only once the verdict says RFQ. Unique, because it goes out in a letter
+    # and two RFQs carrying it would be two RFQs nobody can tell apart - which
+    # is also why the numbering runs on rather than restarting each January.
+    #
+    # The number comes from the `rfq_reference_seq` sequence, which the
+    # migration makes: a counter is exactly what a sequence is, and asking
+    # Postgres for the next one cannot hand the same number out twice.
+    rfq_reference: Mapped[str | None] = mapped_column(String(32), unique=True)
 
     # Ties this row to `data/decisions.jsonl` and to the filled workbook, both
     # of which are named after the decision.
@@ -304,6 +320,10 @@ class RfqLine(Base):
     # moment they change their mind: the screen calls the first state "Review
     # Needed" and the second one is the same state, not a third.
     confirmed_item_code: Mapped[str | None] = mapped_column(String(64))
+    # What a supplier quoted for one unit of it. Null until one of them
+    # answers. `Numeric` rather than `Float`: this is money, and money that
+    # rounds differently on two machines is money somebody argues about.
+    offer_unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
 
     # `code_confirmed`, `code_rejected`, `search`, `none`. The first thing an
     # operator looks at: "their code was wrong" and "we found it by its words"

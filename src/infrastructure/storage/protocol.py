@@ -81,6 +81,19 @@ class Records(Protocol):
         """
         ...
 
+    async def price(self, record_id: str, index: int, unit_price: float | None) -> bool:
+        """Record what a supplier quoted for one unit of a line. True when it took.
+
+        False means there is no such record or no such line in it. Whether the
+        price is a sensible one is not asked here: a store holds what it was
+        told, and the endpoint has already refused anything that is not a
+        positive number.
+
+        `None` clears it, for the same reason `confirm` takes one - an offer
+        withdrawn and an offer never made are the same state.
+        """
+        ...
+
     async def all(self) -> list[EmailRecord]:
         """Every record, newest first."""
         ...
