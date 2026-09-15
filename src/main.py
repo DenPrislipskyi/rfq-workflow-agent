@@ -46,7 +46,12 @@ def create_app() -> FastAPI:
             CORSMiddleware,
             allow_origins=origins,
             allow_credentials=not wildcard,
-            allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+            # Every method the router actually answers. A missing one is not a
+            # 405 a reader could chase: the browser refuses the preflight, the
+            # request never leaves the page, and the button looks dead. `PUT`
+            # was missing when line confirmation was added, and that is exactly
+            # how it presented.
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
             allow_headers=["*"],
         )
 

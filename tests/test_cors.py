@@ -127,3 +127,35 @@ def test_an_empty_setting_says_so_in_the_log(app_with, caplog):
         app_with("")
 
     assert any("CORS_ORIGINS is empty" in record.message for record in caplog.records)
+
+
+def test_every_method_the_router_answers_survives_a_preflight(app_with):
+    """A method the router serves but CORS does not allow is invisible from a
+    page: the browser refuses the preflight, nothing leaves, and the button
+    looks dead. `PUT` was missing when line confirmation was added, and that is
+    exactly how it presented - on production only, because a dev proxy makes
+    the request same-origin and no preflight ever happens.
+    """
+    client = app_with(PAGE)
+    # Asked of the schema rather than of `app.routes`: the API router is
+    # mounted as one entry there and its endpoints are nested inside it, so
+    # walking the top level finds no methods at all and the test would pass on
+    # nothing.
+    served = {
+        method.upper()
+        for path, operations in client.app.openapi()["paths"].items()
+        for method in operations
+        if path.startswith("/api/")
+    }
+    assert served, "no API routes found - this test would pass on nothing"
+
+    for method in sorted(served):
+        answered = client.options(
+            "/api/v1/quotes/any/rfq/lines/1/confirmation",
+            headers={
+                "Origin": PAGE,
+                "Access-Control-Request-Method": method,
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert answered.status_code == 200, f"CORS refuses {method}, which the router answers"
