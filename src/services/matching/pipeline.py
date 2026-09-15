@@ -1,25 +1,28 @@
 """The lines of an RFQ against our own product list.
 
-    judge the rows a code landed on    1 model call per 50 rows
-    look each line up                  no model
+    judge what a code led to    1 model call per 50 lines that had one
+    look each line up           no model
 
 The desk's specification, in three branches:
 
-    the customer's code names a row of the sheet, and that row's own two
-    descriptions are the same product   -> that row, whole, and nothing else
-    the code names a row whose two descriptions are different products
-                                        -> the row is a bad mapping: drop its
-                                           item code, search the sheet with the
-                                           row's customer wording, top five
+    the code names a product, and it is what this line asked for
+                                        -> that row, whole, and nothing else
+    the code names a product that is not what this line asked for
+                                        -> drop the code, search the sheet with
+                                           the line's own words, top five
     the code names nothing, or there was no code
                                         -> search the sheet with the line's own
-                                           item description, top five
+                                           words, top five
 
-What is checked in the first two branches is the *sheet*, not the email. A row
-is one past mapping, and some of them are wrong: row 1 of today's snapshot has
-a customer asking for `EXTERNAL HDD 4TB` against an item that is a fishing rod.
-Every search, in both branches that have one, reads the
-`Item Description / SSG Description` column.
+**What is judged is the customer's own line against the product their code
+leads to.** A code is a claim about a product and the words beside it are
+another; where they disagree, the words win, because the words are what the
+customer is actually asking for. `110188` in today's sheet names a fishing rod,
+and the line that quotes it asks for a 4TB hard drive.
+
+Every search reads the `Item Description / SSG Description` column, and every
+search is asked with the line's own words - the same question in both branches
+that have one, because it is the same question.
 
 Only the last two produce a shortlist. A confirmed code produces one product,
 because there was nothing to choose between.
@@ -45,15 +48,17 @@ logger = logging.getLogger(__name__)
 
 NO_CATALOGUE = "There is no catalogue to match against."
 NOTHING_FOUND = "The sheet had nothing to offer for this line."
-CONFIRMED = "The customer's code names this row, and its two descriptions are the same product."
+CONFIRMED = "The customer's code names this product, and it is what the line asked for."
 REJECTED = (
-    "The customer's code names {code}, whose two descriptions are different products - "
-    "the row is a bad mapping, so the sheet was searched by its customer wording instead."
+    "The customer's code names {code}, which is not what this line asked for - "
+    "the code was dropped and the sheet searched by the line's own words instead."
 )
 SEARCHED = "No row carries this customer code, so the sheet was searched by the requested description."
 NO_CODE = "The customer quoted no code, so the sheet was searched by the requested description."
 
-# One row of the sheet, as the judge is asked about it.
+# What the judge is asked about: the customer's line, and the product their
+# code led to. Not two columns of one sheet row - the sheet's own wording for a
+# product answers a question nobody asked.
 Pair = tuple[str, str]
 
 # "65MM" is the number 65 with a unit stuck to it, and the sheet writes the
@@ -82,25 +87,32 @@ class MatchingPipeline:
             return [_unmatched(item, NO_CATALOGUE) for item in items]
 
         rows = [catalog.by_code(item.customer_item_code) for item in items]
-        verdicts = await self._judged(rows)
+        verdicts = await self._judged(items, rows)
 
         matched = [
-            self._one(item, row, verdicts.get(_pair(row)), catalog)
+            self._one(item, row, verdicts.get(_pair(item, row)), catalog)
             for item, row in zip(items, rows, strict=True)
         ]
         _log(matched)
         return matched
 
     async def _judged(
-        self, rows: Sequence[CatalogItem | None]
+        self, items: Sequence[LineItem], rows: Sequence[CatalogItem | None]
     ) -> dict[Pair, tuple[bool, str]]:
-        """Every distinct row a code landed on, judged once.
+        """Every distinct question, asked once.
 
-        Distinct by its two descriptions rather than by its item code: two
-        lines of one RFQ quoting the same code ask the same question, and the
-        answer does not depend on which line asked.
+        Distinct by the pair of sentences rather than by the code: two lines
+        quoting one code in the same words ask the same question, and two lines
+        quoting it in different words do not - the second is exactly the case
+        where one of them is right and the other is not.
         """
-        pairs = list(dict.fromkeys(_pair(row) for row in rows if row is not None))
+        pairs = list(
+            dict.fromkeys(
+                _pair(item, row)
+                for item, row in zip(items, rows, strict=True)
+                if row is not None
+            )
+        )
         return dict(zip(pairs, await self._judge.run(pairs), strict=True))
 
     def _one(
@@ -124,6 +136,10 @@ class MatchingPipeline:
         # this pipeline did not check does not reach an order.
         same, why = verdict or (False, "")
         if same:
+            # The same score a candidate gets, from the same two sentences the
+            # judge just read. It is not what confirmed the code - the judge
+            # did that - but it says how much of the line the product accounts
+            # for, and a confirmation at 56% is one worth opening.
             return _line(
                 item,
                 query="",
@@ -131,11 +147,15 @@ class MatchingPipeline:
                 product=row,
                 how=CODE_CONFIRMED,
                 why=_and(CONFIRMED, why),
+                confidence=_covered(_words(item.description or ""), _words(row.description)),
             )
 
+        # The same query as the branch below: the customer's own words. Their
+        # code has just been shown to name something else, so the sheet's
+        # wording for that something else is not what to look for.
         return self._searched(
             item,
-            row.customer_description,
+            item.description or "",
             _and(REJECTED.format(code=row.code), why),
             catalog,
             how=CODE_REJECTED,
@@ -158,9 +178,14 @@ class MatchingPipeline:
         return _line(item, query=query, how=how, why=why, candidates=ranked)
 
 
-def _pair(row: CatalogItem | None) -> Pair:
-    """The two sentences of a row, as the judge is asked about them."""
-    return ("", "") if row is None else (row.customer_description, row.description)
+def _pair(item: LineItem, row: CatalogItem | None) -> Pair:
+    """The two sentences the judge is asked about.
+
+    The customer's own line, and the product their code led to. Which line
+    asked matters: the same code quoted beside two different descriptions is
+    two different questions, and usually one of the two is wrong.
+    """
+    return ("", "") if row is None else (item.description or "", row.description)
 
 
 def _and(reason: str, said: str) -> str:

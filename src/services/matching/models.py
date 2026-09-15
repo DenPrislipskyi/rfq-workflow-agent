@@ -52,10 +52,10 @@ class MatchedLine:
     # the best of its own line. Empty for a confirmed code: there was nothing
     # to choose between.
     candidates: list["ScoredItem"] = field(default_factory=list)
-    # None on a confirmed code, and that is the honest answer rather than a
-    # missing one: what confirms the code there is the code, not the words, so
-    # a word score would distrust a right match and barely flag a wrong one -
-    # measured, 50% for the correct goggles against 40% for the wrong bolt.
+    # How much of the line this product accounts for, 0-100. The same score a
+    # candidate carries, and on a confirmed code it comes from the same two
+    # sentences the judge read. `None` only where nothing was compared: a
+    # refusal, or a product a person picked by hand.
     confidence: int | None = None
 
     @property

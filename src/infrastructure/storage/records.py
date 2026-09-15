@@ -150,8 +150,8 @@ class RecordedMatch(BaseModel):
     # configured to describe products by. Resolved here so that nothing
     # downstream has to know the name of a column in somebody's spreadsheet.
     item_description: str = ""
-    # How much of what we searched for this product carries, 0-100. `None` on a
-    # confirmed code: there the code is the evidence, not the words.
+    # How much of the line this product accounts for, 0-100. `None` only where
+    # nothing was compared - a refusal, or a product picked by hand.
     confidence: int | None = None
     item: dict[str, Any] = Field(default_factory=dict)
     # `code_confirmed`, `code_rejected`, `search` or `none`. The first thing an

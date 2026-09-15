@@ -2,13 +2,13 @@
 
 Three branches and nothing else, exactly as the desk specified them:
 
-    the code names a row whose own two descriptions agree  -> that row, alone
-    the code names a row whose own two descriptions differ -> dropped, searched
-    no code, or a code the sheet does not carry            -> searched
+    the code names what this line asked for  -> that product, alone
+    the code names something else            -> dropped, searched by the words
+    no code, or a code the sheet does not carry -> searched by the words
 
-What is checked in the first two branches is the *sheet*, not the email. A row
-is one past mapping and some of them are wrong, so a customer code that lands
-on a bad row must not carry its item code into an order.
+**What is judged is the customer's own line against the product their code
+leads to.** A code is one claim and the words beside it are another; where they
+disagree the words win, because the words are what the customer is asking for.
 """
 
 import re
@@ -52,7 +52,7 @@ ROWS = [
     },
 ]
 
-PAIR = re.compile(r"^  (\d+)\. customer: (.*)\n     item:     (.*)$", re.MULTILINE)
+PAIR = re.compile(r"^  (\d+)\. line: (.*)\n     item: (.*)$", re.MULTILINE)
 
 
 def catalog(rows=None) -> Catalog:
@@ -72,7 +72,7 @@ class Judging:
     the numbering the pipeline relies on is exercised rather than assumed.
     """
 
-    def __init__(self, same=lambda customer, item: True, *, drop: set[int] = frozenset()) -> None:
+    def __init__(self, same=lambda line, item: True, *, drop: set[int] = frozenset()) -> None:
         self._same = same
         self._drop = drop
         self.batches: list[list[tuple[str, str]]] = []
@@ -82,13 +82,13 @@ class Judging:
         return [pair for batch in self.batches for pair in batch]
 
     async def invoke[T](self, messages: Messages, schema: type[T]) -> LLMResult[T]:
-        pairs = [(customer, item) for _, customer, item in PAIR.findall(messages[-1][1])]
+        pairs = [(line, item) for _, line, item in PAIR.findall(messages[-1][1])]
         self.batches.append(pairs)
         return LLMResult(
             value=Judgements(
                 items=[
-                    Judgement(index=index, same=self._same(customer, item), why="said so")
-                    for index, (customer, item) in enumerate(pairs)
+                    Judgement(index=index, same=self._same(line, item), why="said so")
+                    for index, (line, item) in enumerate(pairs)
                     if index not in self._drop
                 ]
             ),
@@ -111,10 +111,10 @@ def line(sr_no: int = 1, description: str = "", code: str | None = None) -> Line
     )
 
 
-# --- branch one: the row agrees with itself -------------------------------
+# --- branch one: the code names what the line asked for -------------------
 
 
-async def test_a_row_that_agrees_with_itself_confirms_its_code():
+async def test_a_code_that_names_what_was_asked_for_is_confirmed():
     judge = Judging()
     items = [line(1, "Hexagon Head Bolts (Bolt with Nut) M16*65", "691284")]
 
@@ -126,9 +126,10 @@ async def test_a_row_that_agrees_with_itself_confirms_its_code():
     assert matched[0].item.fields["Item Description"] == (
         "HEX HEAD BOLT/NUT STEEL UNGALV, M16 X 65MM"
     )
-    # No score, and that is the answer rather than a missing one: what confirms
-    # the code here is the code, not the words.
-    assert matched[0].confidence is None
+    # Scored like a candidate, from the same two sentences the judge read.
+    # Not what confirmed the code - but a low one is a confirmation worth
+    # opening, and the column is no longer empty on a third of the rows.
+    assert matched[0].confidence == 71
 
 
 async def test_a_confirmed_code_is_offered_no_alternatives():
@@ -141,20 +142,21 @@ async def test_a_confirmed_code_is_offered_no_alternatives():
     assert matched[0].query == ""
 
 
-async def test_the_row_is_judged_on_its_own_two_columns_not_on_the_email():
-    """The question is whether the sheet row maps what it says it maps."""
+async def test_the_email_line_is_judged_against_the_product_the_code_names():
+    """Not the sheet's own wording for that product: the sheet answers a
+    question nobody asked. What is on trial is this line against that item."""
     judge = Judging()
 
-    await pipeline(judge).run([line(1, "anything at all", "110188")], catalog())
+    await pipeline(judge).run([line(1, "external hard drive 4TB", "110188")], catalog())
 
-    assert judge.asked == [("EXTERNAL HDD 4TB", "ROD FISHING WITH FURTHER, DETAILS")]
-
-
-# --- branch two: the row contradicts itself -------------------------------
+    assert judge.asked == [("external hard drive 4TB", "ROD FISHING WITH FURTHER, DETAILS")]
 
 
-async def test_a_row_that_contradicts_itself_loses_its_code():
-    judge = Judging(same=lambda customer, item: "HDD" not in customer)
+# --- branch two: the code names something else ----------------------------
+
+
+async def test_a_code_that_names_something_else_is_dropped():
+    judge = Judging(same=lambda line, item: "FISHING" not in item)
 
     matched = await pipeline(judge).run([line(1, "external hdd", "110188")], catalog())
 
@@ -165,14 +167,17 @@ async def test_a_row_that_contradicts_itself_loses_its_code():
     assert "said so" in matched[0].why
 
 
-async def test_an_overruled_row_is_searched_by_its_own_customer_wording():
-    """Not by the line of the email: the desk's specification is that the
-    sheet's own wording for that row is what goes back into the search."""
-    judge = Judging(same=lambda customer, item: "HDD" not in customer)
+async def test_an_overruled_line_is_searched_by_its_own_words():
+    """The same query as the branch below. Their code has just been shown to
+    name something else, so the sheet's wording for that something else is not
+    what to look for."""
+    judge = Judging(same=lambda line, item: "FISHING" not in item)
 
-    matched = await pipeline(judge).run([line(1, "please quote asap", "110188")], catalog())
+    matched = await pipeline(judge).run(
+        [line(1, "external hard disk drive 4TB", "110188")], catalog()
+    )
 
-    assert matched[0].query == "EXTERNAL HDD 4TB"
+    assert matched[0].query == "external hard disk drive 4TB"
     assert [one.item.code for one in matched[0].candidates] == ["T55000100"]
 
 
@@ -287,14 +292,26 @@ async def test_a_line_the_search_cannot_answer_is_a_refusal_with_a_reason():
 # --- what the judge costs, and what happens when it fails -----------------
 
 
-async def test_every_distinct_row_is_judged_once_however_many_lines_want_it():
+async def test_one_code_quoted_the_same_way_twice_is_judged_once():
     judge = Judging()
-    items = [line(1, "bolts", "691284"), line(2, "more bolts", "691284")]
+    items = [line(1, "bolts", "691284"), line(2, "bolts", "691284")]
 
     matched = await pipeline(judge).run(items, catalog())
 
     assert len(judge.asked) == 1
     assert [one.how for one in matched] == [CODE_CONFIRMED, CODE_CONFIRMED]
+
+
+async def test_one_code_quoted_two_different_ways_is_two_questions():
+    """And usually one of the two is wrong. Judging the code once would
+    settle both lines on whichever description happened to be asked about."""
+    judge = Judging(same=lambda line, item: "M16" in line)
+    items = [line(1, "bolts M16 x 65", "691284"), line(2, "bolts M20 x 80", "691284")]
+
+    matched = await pipeline(judge).run(items, catalog())
+
+    assert len(judge.asked) == 2
+    assert [one.how for one in matched] == [CODE_CONFIRMED, CODE_REJECTED]
 
 
 async def test_the_rows_are_judged_in_batches():
@@ -303,7 +320,7 @@ async def test_the_rows_are_judged_in_batches():
          "Customer Code": str(index), "Customer Description": f"widget {index}"}
         for index in range(120)
     ]
-    items = [line(index + 1, f"widget {index}", str(index)) for index in range(120)]
+    items = [line(index + 1, f"widget number {index}", str(index)) for index in range(120)]
 
     judge = Judging()
     await pipeline(judge, batch=50).run(items, catalog(rows))
@@ -357,7 +374,7 @@ async def test_the_customers_own_words_survive_every_branch():
     ]
 
     matched = await pipeline(
-        Judging(same=lambda customer, item: "HDD" not in customer)
+        Judging(same=lambda line, item: "FISHING" not in item)
     ).run(items, catalog())
 
     assert [one.verbatim for one in matched] == [

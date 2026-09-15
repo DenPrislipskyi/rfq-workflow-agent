@@ -24,8 +24,8 @@ from tests.fakes import BrokenLLM
 from tests.test_extraction_handler import Router, attachment, build_handler, message
 
 # The rope is the first line of the requisition every test reads back, and this
-# row is the sheet's record of a customer once asking for it. Both description
-# columns are filled, because whether they agree is the whole question.
+# row is what its code leads to. What is judged is that line against this row's
+# `Item Description / SSG Description`.
 ROW = {
     "Sr #": "6",
     "Customer Code": "550101",
@@ -41,9 +41,9 @@ ROW = {
 def catalog(customer_description: str | None = None) -> Catalog:
     """The one-row sheet. `customer_description` is what it files the rope under.
 
-    A parameter because that column is what the sheet is searched with once a
-    quoted code has been overruled, and the requisition's own wording cannot
-    be changed.
+    Kept as a parameter although matching no longer reads that column: it is
+    still what `Catalog` carries, and a test that sets it proves the column is
+    not quietly back in the question.
     """
     row = ROW if customer_description is None else ROW | {"Customer Description": customer_description}
     return Catalog.from_rows(
@@ -99,10 +99,9 @@ def recorded(tmp_path: Path) -> dict:
     return json.loads((folders[0] / "email.json").read_text(encoding="utf-8"))
 
 
-async def test_a_row_that_agrees_with_itself_confirms_its_code(tmp_path: Path):
-    """The first branch: the customer's code names a row of the sheet, and that
-    row's own two descriptions are the same product. One product, no shortlist -
-    there was nothing to choose between."""
+async def test_a_code_that_names_what_was_asked_for_is_confirmed(tmp_path: Path):
+    """The first branch: the code names a product, and it is what the line
+    asked for. One product, no shortlist - nothing to choose between."""
     handler, _, _ = build(tmp_path)
 
     await handler.handle(message(attachment()))
@@ -111,7 +110,10 @@ async def test_a_row_that_agrees_with_itself_confirms_its_code(tmp_path: Path):
     assert line["customer_code"] == "550101"
     assert line["item_code"] == "T55010100"
     assert line["how"] == "code_confirmed"
-    assert line["confidence"] is None, "the code is the evidence here, not the words"
+    # Five of the seven words of `ROPE PP 24MM X 220M` are in `ROPE
+    # POLYPROPYLENE 24MM X 220MTR`. Scored like a candidate, from the same two
+    # sentences the judge read.
+    assert line["confidence"] == 71
     assert line["candidates"] == [], "a confirmed code produces no shortlist"
 
 
@@ -128,11 +130,9 @@ async def test_the_whole_row_of_the_sheet_reaches_the_record(tmp_path: Path):
     assert line["item"]["Branch"].startswith("Seven Seas")
 
 
-async def test_a_row_that_contradicts_itself_is_dropped_and_searched_instead(
-    tmp_path: Path,
-):
-    """The second branch, and the desk's own rule: the code named a row that
-    maps the wrong thing, so the code loses."""
+async def test_a_code_that_names_something_else_is_dropped(tmp_path: Path):
+    """The second branch, and the desk's own rule: a code that does not name
+    what the line asked for loses to the words."""
     handler, _, _ = build(tmp_path, llm=MatchingRouter(same=False))
 
     await handler.handle(message(attachment()))
@@ -141,7 +141,7 @@ async def test_a_row_that_contradicts_itself_is_dropped_and_searched_instead(
     assert line["how"] == "code_rejected"
     assert line["item_code"] is None, "the rejected code is not the answer"
     assert line["item"] == {}
-    assert "different products" in line["why"]
+    assert "not what this line asked for" in line["why"]
     assert "the judge said so" in line["why"]
 
 
@@ -162,11 +162,9 @@ async def test_a_candidate_carries_the_whole_row_too(tmp_path: Path):
     assert line["candidates"][0]["confidence"] == 71
 
 
-async def test_the_line_keeps_both_what_was_written_and_what_was_searched_for(
-    tmp_path: Path,
-):
-    """And the customer's own quantity and unit, unconverted: the sheet has
-    units of its own and they are not these."""
+async def test_an_overruled_line_is_searched_by_its_own_words(tmp_path: Path):
+    """And the customer's own quantity and unit survive, unconverted: the sheet
+    has units of its own and they are not these."""
     handler, _, _ = build(
         tmp_path, llm=MatchingRouter(same=False), shelf_wording="ROPE NYLON 24MM"
     )
@@ -176,7 +174,7 @@ async def test_the_line_keeps_both_what_was_written_and_what_was_searched_for(
     line = recorded(tmp_path)["matching"][0]
     assert line["quantity"] and line["uom"]
     assert line["verbatim"] == "ROPE PP 24MM X 220M"
-    assert line["query"] == "ROPE NYLON 24MM", "the sheet's wording, not the email's"
+    assert line["query"] == "ROPE PP 24MM X 220M", "the email's words, not the sheet's"
 
 
 async def test_a_confirmed_line_was_searched_for_nothing(tmp_path: Path):
