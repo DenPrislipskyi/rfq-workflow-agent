@@ -1,18 +1,25 @@
 """The lines of an RFQ against our own product list.
 
-    restate the lines          1 model call per ~50 lines
-    look each one up           no model
-
-One model call for an RFQ of any size, and it never sees the catalogue: it only
-says the customer's line back in the vocabulary the sheet uses, so that the two
-can be compared. Everything after that is arithmetic over words.
+    judge the rows a code landed on    1 model call per 50 rows
+    look each line up                  no model
 
 The desk's specification, in three branches:
 
-    the customer's code names an item, and our restated line agrees
-    with that item's own customer wording          -> that item, and nothing else
-    the code names an item and the wordings differ -> drop it, search, top five
-    the code names nothing, or there was no code   -> search, top five
+    the customer's code names a row of the sheet, and that row's own two
+    descriptions are the same product   -> that row, whole, and nothing else
+    the code names a row whose two descriptions are different products
+                                        -> the row is a bad mapping: drop its
+                                           item code, search the sheet with the
+                                           row's customer wording, top five
+    the code names nothing, or there was no code
+                                        -> search the sheet with the line's own
+                                           item description, top five
+
+What is checked in the first two branches is the *sheet*, not the email. A row
+is one past mapping, and some of them are wrong: row 1 of today's snapshot has
+a customer asking for `EXTERNAL HDD 4TB` against an item that is a fishing rod.
+Every search, in both branches that have one, reads the
+`Item Description / SSG Description` column.
 
 Only the last two produce a shortlist. A confirmed code produces one product,
 because there was nothing to choose between.
@@ -24,7 +31,7 @@ from collections.abc import Sequence
 
 from src.domain.rules.catalog import Candidate, Catalog, CatalogItem, tokenize
 from src.services.extraction.models import LineItem
-from src.services.matching.describe import LineDescriber
+from src.services.matching.judge import AgreementJudge
 from src.services.matching.models import (
     BY_SEARCH,
     CODE_CONFIRMED,
@@ -37,39 +44,30 @@ from src.services.matching.models import (
 logger = logging.getLogger(__name__)
 
 NO_CATALOGUE = "There is no catalogue to match against."
-NOTHING_FOUND = "The catalogue had nothing to offer for this line."
-CONFIRMED = "The customer's code names this product and the descriptions agree ({percent}%)."
+NOTHING_FOUND = "The sheet had nothing to offer for this line."
+CONFIRMED = "The customer's code names this row, and its two descriptions are the same product."
 REJECTED = (
-    "The customer's code names {code}, whose description agrees only {percent}% - "
-    "rejected, and the catalogue searched by description instead."
+    "The customer's code names {code}, whose two descriptions are different products - "
+    "the row is a bad mapping, so the sheet was searched by its customer wording instead."
 )
-SEARCHED = "No item carries this customer code, so the catalogue was searched by description."
-NO_CODE = "The customer quoted no code, so the catalogue was searched by description."
+SEARCHED = "No row carries this customer code, so the sheet was searched by the requested description."
+NO_CODE = "The customer quoted no code, so the sheet was searched by the requested description."
 
-# How much of a line has to appear in an item's own customer wording before the
-# code that named it is taken at its word. The desk's number.
-AGREEMENT = 80.0
+# One row of the sheet, as the judge is asked about it.
+Pair = tuple[str, str]
 
-# "65MM" is the number 65 with a unit stuck to it, and the sheet writes the same
-# size both ways. Only the comparison widens like this; the index does not.
+# "65MM" is the number 65 with a unit stuck to it, and the sheet writes the
+# same size both ways. Only the scoring widens like this; the index does not.
 NUMBER_AND_UNIT = re.compile(r"^(\d+(?:[.,]\d+)?)([a-z]{1,4})$")
 
 
 class MatchingPipeline:
     """Turns the lines of one RFQ into products, or into reasons there are none."""
 
-    def __init__(
-        self,
-        describer: LineDescriber,
-        *,
-        candidates: int = 5,
-        agreement: float = AGREEMENT,
-    ) -> None:
-        self._describer = describer
+    def __init__(self, judge: AgreementJudge, *, candidates: int = 5) -> None:
+        self._judge = judge
         # How many products a line that had to be searched is narrowed down to.
         self._candidates = candidates
-        # The threshold a confirmed code has to clear, as a percentage.
-        self._agreement = agreement
 
     async def run(self, items: Sequence[LineItem], catalog: Catalog) -> list[MatchedLine]:
         """Every line, matched or refused, in the order they arrived.
@@ -83,98 +81,127 @@ class MatchingPipeline:
             logger.warning("No catalogue loaded - nothing can be matched")
             return [_unmatched(item, NO_CATALOGUE) for item in items]
 
-        wordings = [item.description or "" for item in items]
-        described = await self._describer.run(wordings)
+        rows = [catalog.by_code(item.customer_item_code) for item in items]
+        verdicts = await self._judged(rows)
 
         matched = [
-            self._one(item, description, catalog)
-            for item, description in zip(items, described, strict=True)
+            self._one(item, row, verdicts.get(_pair(row)), catalog)
+            for item, row in zip(items, rows, strict=True)
         ]
         _log(matched)
         return matched
 
-    def _one(self, item: LineItem, description: str, catalog: Catalog) -> MatchedLine:
-        """One line down one of the three branches."""
-        found = catalog.by_code(item.customer_item_code)
+    async def _judged(
+        self, rows: Sequence[CatalogItem | None]
+    ) -> dict[Pair, tuple[bool, str]]:
+        """Every distinct row a code landed on, judged once.
 
-        if found is not None:
-            agreement = _agreement(
-                item.description or "", description, found.customer_description
+        Distinct by its two descriptions rather than by its item code: two
+        lines of one RFQ quoting the same code ask the same question, and the
+        answer does not depend on which line asked.
+        """
+        pairs = list(dict.fromkeys(_pair(row) for row in rows if row is not None))
+        return dict(zip(pairs, await self._judge.run(pairs), strict=True))
+
+    def _one(
+        self,
+        item: LineItem,
+        row: CatalogItem | None,
+        verdict: tuple[bool, str] | None,
+        catalog: Catalog,
+    ) -> MatchedLine:
+        """One line down one of the three branches."""
+        if row is None:
+            return self._searched(
+                item,
+                item.description or "",
+                SEARCHED if item.customer_item_code else NO_CODE,
+                catalog,
             )
-            if agreement > self._agreement:
-                return _line(
-                    item,
-                    description,
-                    item_code=found.code,
-                    product=found,
-                    how=CODE_CONFIRMED,
-                    why=CONFIRMED.format(percent=round(agreement)),
-                    confidence=100,
-                )
+
+        # A row nobody judged is a row nobody vouched for, and it takes the
+        # same branch as one judged against: whatever else happens, a code
+        # this pipeline did not check does not reach an order.
+        same, why = verdict or (False, "")
+        if same:
             return _line(
                 item,
-                description,
-                how=CODE_REJECTED,
-                why=REJECTED.format(code=found.code, percent=round(agreement)),
-                candidates=catalog.search(description, limit=self._candidates),
+                query="",
+                item_code=row.code,
+                product=row,
+                how=CODE_CONFIRMED,
+                why=_and(CONFIRMED, why),
             )
 
-        ranked = catalog.search(description, limit=self._candidates)
-        if not ranked:
-            return _line(item, description, how=NOTHING, why=NOTHING_FOUND)
-        return _line(
+        return self._searched(
             item,
-            description,
-            how=BY_SEARCH,
-            why=SEARCHED if item.customer_item_code else NO_CODE,
-            candidates=ranked,
+            row.customer_description,
+            _and(REJECTED.format(code=row.code), why),
+            catalog,
+            how=CODE_REJECTED,
         )
 
+    def _searched(
+        self,
+        item: LineItem,
+        query: str,
+        why: str,
+        catalog: Catalog,
+        *,
+        how: str = BY_SEARCH,
+    ) -> MatchedLine:
+        """The two branches that end in a shortlist, and what happens to an
+        empty one: it is a refusal with its reason kept, not a silent match."""
+        ranked = catalog.search(query, limit=self._candidates)
+        if not ranked:
+            return _line(item, query=query, how=NOTHING, why=_and(why, NOTHING_FOUND))
+        return _line(item, query=query, how=how, why=why, candidates=ranked)
 
-def _agreement(verbatim: str, description: str, customer_description: str) -> float:
-    """How much of a line the item's own customer wording carries.
 
-    Measured twice - once against the customer's own sentence, once against our
-    restatement of it - and the better of the two stands.
+def _pair(row: CatalogItem | None) -> Pair:
+    """The two sentences of a row, as the judge is asked about them."""
+    return ("", "") if row is None else (row.customer_description, row.description)
 
-    The customer's own sentence is the comparison that belongs here. The column
-    it is measured against holds *a customer's* wording, so a line that says
-    what the sheet already says must score full marks; it did not, because we
-    were comparing our restatement to their sentence and calling the difference
-    disagreement. `RULE CONVEX` against `Convex rulers` scored 50% and the code
-    was dropped, for a line that matched the sheet word for word.
 
-    The restatement stays as the second chance, for the line that means the
-    same thing in different words. Whichever agrees more is the answer.
+def _and(reason: str, said: str) -> str:
+    """The branch's own reason, and what the model said about the row."""
+    return f"{reason} {said}".strip() if said else reason
+
+
+def _scored(candidates: Sequence[Candidate], query: str) -> list[ScoredItem]:
+    """How much of what we searched for each candidate actually carries.
+
+    A percentage of the **query's** words, not of the best candidate's score.
+    The difference is the whole point: a score relative to the best one makes
+    the best one 100% by construction - it is divided by itself - so the top
+    row of every shortlist claimed certainty it never had, whether it was the
+    right bolt or a box of eggs.
+
+    Absolute, so it means the same thing on every line and can be read without
+    the rest of the list. Measured on the sheet: a query whose product is not
+    in the catalogue at all scores its top candidate 11-17%, and one whose
+    product is there scores it 43-60%. That gap is what the number is for.
+
+    Ranking stays BM25's job. It knows which words are rare, and rarity is
+    what tells two bolts apart; counting words does not. This only says how
+    much of the question each answer covers.
     """
-    theirs = _compared(customer_description)
-    return max(
-        _overlap(_compared(verbatim), theirs),
-        _overlap(_compared(description), theirs),
-    )
+    asked = _words(query)
+    return [
+        ScoredItem(
+            item=candidate.item,
+            confidence=_covered(asked, _words(candidate.item.description)),
+        )
+        for candidate in candidates
+    ]
 
 
-def _overlap(ours: Sequence[str] | set[str], theirs: set[str]) -> float:
-    """A percentage of the words we asked with, not of the words it has.
-
-    An item described at length is not punished for saying more than was asked,
-    and a line whose every word is there is the same product however much the
-    sheet goes on about it.
-    """
-    ours = set(ours)
-    return 100.0 * len(ours & theirs) / len(ours) if ours else 0.0
-
-
-def _compared(text: str) -> set[str]:
-    """The words of one sentence, as this comparison counts them.
+def _words(text: str) -> set[str]:
+    """The words of one sentence, as this scoring counts them.
 
     The search's own tokenizer, and then one thing more: a number welded to a
     unit also counts as the bare number, so `65MM` and `65` are not two
-    different sizes.
-
-    This widening is for the comparison only. The catalogue is built and
-    searched exactly as it was - nothing here reaches the index, and the
-    ranking that `test_cases_2/3` gets right is untouched.
+    different sizes. Nothing here reaches the index.
     """
     words: set[str] = set()
     for word in tokenize(text):
@@ -184,29 +211,20 @@ def _compared(text: str) -> set[str]:
     return words
 
 
-def _scored(candidates: Sequence[Candidate]) -> list[ScoredItem]:
-    """The search's own ranking, as a percentage of its best row.
+def _covered(asked: set[str], offered: set[str]) -> int:
+    """A percentage of the words we asked with, not of the words it has.
 
-    Relative on purpose, and only within one line: a BM25 score is not a
-    probability and two lines' scores are not comparable. What it does say -
-    and all it says - is how far each candidate is behind the one above it.
+    An item described at length is not punished for saying more than it was
+    asked; a line whose every word is there is a full answer however much the
+    sheet goes on about it.
     """
-    if not candidates:
-        return []
-    top = candidates[0].score or 1.0
-    return [
-        ScoredItem(
-            item=candidate.item,
-            confidence=max(0, min(100, round(100.0 * candidate.score / top))),
-        )
-        for candidate in candidates
-    ]
+    return round(100 * len(asked & offered) / len(asked)) if asked else 0
 
 
 def _line(
     item: LineItem,
-    description: str,
     *,
+    query: str,
     item_code: str | None = None,
     product: CatalogItem | None = None,
     how: str,
@@ -217,7 +235,7 @@ def _line(
     return MatchedLine(
         index=item.sr_no,
         verbatim=item.description or "",
-        description=description,
+        query=query,
         customer_code=item.customer_item_code,
         quantity=item.quantity,
         uom=item.uom,
@@ -226,7 +244,7 @@ def _line(
         how=how,
         why=why,
         confidence=confidence,
-        candidates=_scored(candidates),
+        candidates=_scored(candidates, query),
     )
 
 
@@ -234,7 +252,7 @@ def _unmatched(item: LineItem, why: str) -> MatchedLine:
     return MatchedLine(
         index=item.sr_no,
         verbatim=item.description or "",
-        description=item.description or "",
+        query="",
         customer_code=item.customer_item_code,
         quantity=item.quantity,
         uom=item.uom,

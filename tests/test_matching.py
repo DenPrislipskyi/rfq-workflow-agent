@@ -2,25 +2,29 @@
 
 Three branches and nothing else, exactly as the desk specified them:
 
-    the code names an item whose customer wording agrees -> that item, alone
-    the code names an item whose wording disagrees       -> dropped, searched
-    no code, or a code the sheet does not carry          -> searched
+    the code names a row whose own two descriptions agree  -> that row, alone
+    the code names a row whose own two descriptions differ -> dropped, searched
+    no code, or a code the sheet does not carry            -> searched
 
-The case that matters most is the middle one. An item code is a key the desk
-orders against, and the desk's own notes are that a customer's code cannot be
-trusted on its own - so what settles it is the wording, every time.
+What is checked in the first two branches is the *sheet*, not the email. A row
+is one past mapping and some of them are wrong, so a customer code that lands
+on a bad row must not carry its item code into an order.
 """
 
+import re
+
 from src.domain.rules.catalog import Catalog
+from src.infrastructure.llm.client import LLMResult, Messages
 from src.infrastructure.llm.exceptions import LLMCallError
 from src.services.extraction.models import LineItem
-from src.services.matching import LineDescriber, MatchingPipeline
+from src.services.matching import AgreementJudge, MatchingPipeline
 from src.services.matching.models import BY_SEARCH, CODE_CONFIRMED, CODE_REJECTED, NOTHING
-from tests.fakes import BrokenLLM, FakeLLM
-from src.services.matching.schemas import RestatedLine, RestatedLines
+from src.services.matching.schemas import Judgement, Judgements
+from tests.fakes import BrokenLLM
 
-# Two bolts that differ by one size token, and a fishing rod the desk put in
-# the sheet as an example of a customer code that leads somewhere else.
+# Two bolts that differ by one size token; the fishing rod the desk put in the
+# sheet as an example of a row that maps the wrong thing; and the drive that
+# row's customer actually asked for.
 ROWS = [
     {
         "Item Code": "T69128400",
@@ -40,7 +44,15 @@ ROWS = [
         "Customer Code": "110188",
         "Customer Description": "EXTERNAL HDD 4TB",
     },
+    {
+        "Item Code": "T55000100",
+        "Item Description": "EXTERNAL HARD DISK DRIVE 4TB USB",
+        "Customer Code": "550001",
+        "Customer Description": "portable drive",
+    },
 ]
+
+PAIR = re.compile(r"^  (\d+)\. customer: (.*)\n     item:     (.*)$", re.MULTILINE)
 
 
 def catalog(rows=None) -> Catalog:
@@ -53,23 +65,43 @@ def catalog(rows=None) -> Catalog:
     )
 
 
-class Restating(FakeLLM):
-    """A describer that says each line back exactly as told."""
+class Judging:
+    """A judge that answers from a rule, and keeps what it was asked.
 
-    def __init__(self, *descriptions: str) -> None:
-        super().__init__(
-            RestatedLines(
-                lines=[
-                    RestatedLine(index=index, description=text)
-                    for index, text in enumerate(descriptions)
+    The pairs are read back out of the prompt rather than handed in, so that
+    the numbering the pipeline relies on is exercised rather than assumed.
+    """
+
+    def __init__(self, same=lambda customer, item: True, *, drop: set[int] = frozenset()) -> None:
+        self._same = same
+        self._drop = drop
+        self.batches: list[list[tuple[str, str]]] = []
+
+    @property
+    def asked(self) -> list[tuple[str, str]]:
+        return [pair for batch in self.batches for pair in batch]
+
+    async def invoke[T](self, messages: Messages, schema: type[T]) -> LLMResult[T]:
+        pairs = [(customer, item) for _, customer, item in PAIR.findall(messages[-1][1])]
+        self.batches.append(pairs)
+        return LLMResult(
+            value=Judgements(
+                items=[
+                    Judgement(index=index, same=self._same(customer, item), why="said so")
+                    for index, (customer, item) in enumerate(pairs)
+                    if index not in self._drop
                 ]
-            )
+            ),
+            model="fake",
+            latency_ms=1,
+            input_tokens=1,
+            output_tokens=1,
         )
 
 
-def pipeline(llm, candidates: int = 5, agreement: float = 80.0) -> MatchingPipeline:
+def pipeline(llm, *, candidates: int = 5, batch: int = 50) -> MatchingPipeline:
     return MatchingPipeline(
-        LineDescriber(llm), candidates=candidates, agreement=agreement
+        AgreementJudge(llm, batch=batch, concurrency=4), candidates=candidates
     )
 
 
@@ -79,188 +111,275 @@ def line(sr_no: int = 1, description: str = "", code: str | None = None) -> Line
     )
 
 
-async def test_a_code_whose_wording_agrees_is_confirmed_alone():
-    """The first branch. One product, and no shortlist beside it: there was
-    nothing to choose between, so offering alternatives would invent a doubt."""
-    items = [line(description="Hexagon Head Bolts Full Threaded M16*65", code="691284")]
-    matched = await pipeline(Restating("HEXAGON HEAD BOLTS FULL THREADED M16 X 65MM")).run(
-        items, catalog()
-    )
+# --- branch one: the row agrees with itself -------------------------------
 
-    assert matched[0].item_code == "T69128400"
+
+async def test_a_row_that_agrees_with_itself_confirms_its_code():
+    judge = Judging()
+    items = [line(1, "Hexagon Head Bolts (Bolt with Nut) M16*65", "691284")]
+
+    matched = await pipeline(judge).run(items, catalog())
+
     assert matched[0].how == CODE_CONFIRMED
-    assert matched[0].confidence == 100
-    assert matched[0].candidates == []
-
-
-async def test_a_code_whose_wording_disagrees_is_dropped_and_the_sheet_searched():
-    """The desk's own case: code 691284 is the M16 bolt and the customer
-    described an M20. The code loses, and the line goes to the search."""
-    items = [line(description="Hexagon head bolts with nut M20 x 80", code="691284")]
-    matched = await pipeline(Restating("HEXAGON HEAD BOLTS FULL THREADED M20 X 80MM")).run(
-        items, catalog()
+    assert matched[0].item_code == "T69128400"
+    assert matched[0].item is not None
+    assert matched[0].item.fields["Item Description"] == (
+        "HEX HEAD BOLT/NUT STEEL UNGALV, M16 X 65MM"
     )
+    # No score, and that is the answer rather than a missing one: what confirms
+    # the code here is the code, not the words.
+    assert matched[0].confidence is None
+
+
+async def test_a_confirmed_code_is_offered_no_alternatives():
+    """There was nothing to choose between: one row, whole, and no shortlist."""
+    matched = await pipeline(Judging()).run(
+        [line(1, "Hexagon Head Bolts M16*65", "691284")], catalog()
+    )
+
+    assert matched[0].candidates == []
+    assert matched[0].query == ""
+
+
+async def test_the_row_is_judged_on_its_own_two_columns_not_on_the_email():
+    """The question is whether the sheet row maps what it says it maps."""
+    judge = Judging()
+
+    await pipeline(judge).run([line(1, "anything at all", "110188")], catalog())
+
+    assert judge.asked == [("EXTERNAL HDD 4TB", "ROD FISHING WITH FURTHER, DETAILS")]
+
+
+# --- branch two: the row contradicts itself -------------------------------
+
+
+async def test_a_row_that_contradicts_itself_loses_its_code():
+    judge = Judging(same=lambda customer, item: "HDD" not in customer)
+
+    matched = await pipeline(judge).run([line(1, "external hdd", "110188")], catalog())
 
     assert matched[0].how == CODE_REJECTED
-    assert matched[0].item_code is None, "a dropped code is not an answer"
+    assert matched[0].item_code is None
     assert matched[0].item is None
-    assert "T69128400" in matched[0].why, "the record says which code was dropped"
-    assert [one.item.code for one in matched[0].candidates][0] == "T69133100"
+    assert "T11018800" in matched[0].why
+    assert "said so" in matched[0].why
 
 
-async def test_a_line_with_no_code_is_searched_on_its_words():
-    items = [line(description="hex head bolts with nuts M20 x 80")]
-    matched = await pipeline(Restating("HEXAGON HEAD BOLTS FULL THREADED M20 X 80MM")).run(
-        items, catalog()
-    )
+async def test_an_overruled_row_is_searched_by_its_own_customer_wording():
+    """Not by the line of the email: the desk's specification is that the
+    sheet's own wording for that row is what goes back into the search."""
+    judge = Judging(same=lambda customer, item: "HDD" not in customer)
+
+    matched = await pipeline(judge).run([line(1, "please quote asap", "110188")], catalog())
+
+    assert matched[0].query == "EXTERNAL HDD 4TB"
+    assert [one.item.code for one in matched[0].candidates] == ["T55000100"]
+
+
+# --- branch three: no code, or a code the sheet does not carry ------------
+
+
+async def test_a_line_with_no_code_is_searched_on_its_own_description():
+    judge = Judging()
+    matched = await pipeline(judge).run([line(1, "hex head bolt m20 80mm")], catalog())
 
     assert matched[0].how == BY_SEARCH
-    assert matched[0].item_code is None
-    assert [one.item.code for one in matched[0].candidates][0] == "T69133100"
+    assert matched[0].query == "hex head bolt m20 80mm"
+    assert matched[0].candidates[0].item.code == "T69133100"
+    assert judge.asked == [], "nothing was found by code, so nothing had to be judged"
 
 
 async def test_a_code_the_sheet_does_not_carry_is_searched_too():
-    """Same branch as no code at all: nothing in the sheet answers to it."""
-    items = [line(description="hex head bolts M20 x 80", code="0012345")]
-    matched = await pipeline(Restating("HEXAGON HEAD BOLTS FULL THREADED M20 X 80MM")).run(
-        items, catalog()
+    matched = await pipeline(Judging()).run(
+        [line(1, "hex head bolt m16 65mm", "NO-SUCH-CODE")], catalog()
     )
 
     assert matched[0].how == BY_SEARCH
-    assert matched[0].customer_code == "0012345", "kept as the customer wrote it"
+    assert matched[0].item_code is None
+    assert "No row carries this customer code" in matched[0].why
+
+
+async def test_the_two_searched_branches_say_which_one_they_were():
+    quoted = await pipeline(Judging()).run([line(1, "bolt", "NOPE")], catalog())
+    silent = await pipeline(Judging()).run([line(1, "bolt")], catalog())
+
+    assert quoted[0].why != silent[0].why
+    assert "quoted no code" in silent[0].why
+
+
+# --- the shortlist --------------------------------------------------------
 
 
 async def test_the_shortlist_is_capped_at_what_was_asked_for():
-    items = [line(description="hexagon head bolts full threaded")]
-    matched = await pipeline(Restating("HEXAGON HEAD BOLTS FULL THREADED"), candidates=1).run(
-        items, catalog()
+    matched = await pipeline(Judging(), candidates=2).run(
+        [line(1, "hex head bolt steel")], catalog()
     )
 
-    assert len(matched[0].candidates) == 1
+    assert len(matched[0].candidates) == 2
 
 
-async def test_candidates_are_scored_against_the_best_of_their_own_line():
-    """A relative ranking, and only within one line. The first is always 100
-    and nothing compares it to another line's."""
-    items = [line(description="hexagon head bolts full threaded M16 X 65MM")]
-    matched = await pipeline(Restating("HEXAGON HEAD BOLTS FULL THREADED M16 X 65MM")).run(
-        items, catalog()
+async def test_one_candidate_per_item_code_however_many_rows_it_has():
+    rows = [
+        {"Item Code": "T31237400", "Item Description": "BOILERSUIT NAVY 3XL",
+         "Customer Description": "boilersuit 3XL"},
+        {"Item Code": "T31237400", "Item Description": "BOILERSUIT NAVY 2XL",
+         "Customer Description": "boilersuit 2XL"},
+    ]
+
+    matched = await pipeline(Judging()).run([line(1, "boilersuit navy")], catalog(rows))
+
+    assert [one.item.code for one in matched[0].candidates] == ["T31237400"]
+
+
+async def test_a_candidate_is_scored_on_how_much_of_the_question_it_answers():
+    """Absolute, so it reads the same on every line. The old score was a
+    percentage of the best candidate, which made the best one 100% by dividing
+    it by itself - every shortlist claimed certainty it never had."""
+    matched = await pipeline(Judging()).run(
+        [line(1, "hex head bolt nut steel ungalv m16 65mm")], catalog()
     )
 
-    scores = [one.confidence for one in matched[0].candidates]
-    assert scores[0] == 100
-    assert scores == sorted(scores, reverse=True)
-    assert all(0 <= score <= 100 for score in scores)
+    best, *rest = matched[0].candidates
+    assert best.item.code == "T69128400"
+    assert best.confidence == 100, "every word asked for is in this product"
+    assert all(one.confidence < 100 for one in rest), "and not in the others"
+
+
+async def test_the_top_candidate_is_not_100_percent_just_for_being_top():
+    """The bug this replaced: a box of eggs at the top of a shortlist scored
+    the same as a perfect match, because both were divided by themselves.
+
+    A customer who names a family without its size is asking a question the
+    sheet cannot answer on its own, and the shortlist has to say so rather
+    than put a 100% on whichever row sorted first."""
+    matched = await pipeline(Judging()).run(
+        [line(1, "hexagon head bolts with nut, full thread")], catalog()
+    )
+
+    scored = {one.item.code: one.confidence for one in matched[0].candidates}
+    bolts = [scored[code] for code in ("T69128400", "T69133100") if code in scored]
+
+    assert len(bolts) == 2
+    assert all(score < 100 for score in bolts), "no size was asked for, so nothing is certain"
+    assert len(set(bolts)) == 1, "and nothing distinguishes the two of them"
+    assert scored["T11018800"] < min(bolts), "the fishing rod is visibly further away"
+
+
+async def test_a_shortlist_for_something_we_do_not_sell_scores_low():
+    """The number's whole job: a line whose product is not in the sheet still
+    gets a shortlist, and it has to look like one."""
+    matched = await pipeline(Judging()).run(
+        [line(1, "turbocharger cartridge NR34 for marine diesel bolt")], catalog()
+    )
+
+    assert matched[0].candidates, "BM25 found something on the word it shares"
+    assert max(one.confidence for one in matched[0].candidates) <= 30
 
 
 async def test_a_line_the_search_cannot_answer_is_a_refusal_with_a_reason():
-    items = [line(description="turbocharger cartridge NR34/S")]
-    matched = await pipeline(Restating("TURBOCHARGER CARTRIDGE NR34/S")).run(items, catalog())
+    matched = await pipeline(Judging()).run([line(1, "zzzz qqqq")], catalog())
 
     assert matched[0].how == NOTHING
     assert matched[0].item_code is None
-    assert matched[0].candidates == []
-    assert matched[0].why
+    assert "nothing to offer" in matched[0].why
 
 
-async def test_the_threshold_is_what_decides_between_the_first_two_branches():
-    """Same line, same sheet, two thresholds. At 80 the wording is not enough;
-    at 40 it is. Nothing else in the branch changes."""
-    items = [line(description="chrome plated fastener as per drawing", code="691284")]
-    restated = "HEXAGON HEAD BOLTS M16 CHROME PLATED"
-
-    strict = await pipeline(Restating(restated), agreement=80.0).run(items, catalog())
-    loose = await pipeline(Restating(restated), agreement=40.0).run(items, catalog())
-
-    assert strict[0].how == CODE_REJECTED
-    assert loose[0].how == CODE_CONFIRMED
+# --- what the judge costs, and what happens when it fails -----------------
 
 
-async def test_a_line_that_says_what_the_sheet_says_is_not_argued_with():
-    """The bug this pair of comparisons exists for.
+async def test_every_distinct_row_is_judged_once_however_many_lines_want_it():
+    judge = Judging()
+    items = [line(1, "bolts", "691284"), line(2, "more bolts", "691284")]
 
-    The customer wrote the sentence the sheet already files this product under.
-    Our restatement of it says the same thing in our own words and shares half
-    of them - and for a while that half was the whole answer, so a line that
-    matched word for word had its code dropped.
-    """
-    items = [line(description="Hexagon Head Bolts Full Threaded M16 X 65MM", code="691284")]
+    matched = await pipeline(judge).run(items, catalog())
 
-    matched = await pipeline(Restating("HEX HEAD BOLT/NUT FULL THREADED M16 X 65MM")).run(
-        items, catalog()
-    )
-
-    assert matched[0].how == CODE_CONFIRMED
-    assert matched[0].item_code == "T69128400"
+    assert len(judge.asked) == 1
+    assert [one.how for one in matched] == [CODE_CONFIRMED, CODE_CONFIRMED]
 
 
-async def test_a_size_welded_to_its_unit_is_the_same_size():
-    """`65MM` and `65` are one number written twice. Only the comparison is
-    widened like this - the index is built and searched exactly as before."""
-    items = [line(description="Hexagon Head Bolts Full Threaded M16 X 65", code="691284")]
+async def test_the_rows_are_judged_in_batches():
+    rows = [
+        {"Item Code": f"T{index:08d}", "Item Description": f"WIDGET NUMBER {index}",
+         "Customer Code": str(index), "Customer Description": f"widget {index}"}
+        for index in range(120)
+    ]
+    items = [line(index + 1, f"widget {index}", str(index)) for index in range(120)]
 
-    matched = await pipeline(Restating("HEXAGON HEAD BOLTS FULL THREADED M16 X 65MM")).run(
-        items, catalog()
-    )
+    judge = Judging()
+    await pipeline(judge, batch=50).run(items, catalog(rows))
 
-    assert matched[0].how == CODE_CONFIRMED
+    assert [len(batch) for batch in judge.batches] == [50, 50, 20]
+    assert len(judge.asked) == 120
+
+
+async def test_a_judge_that_fails_confirms_nothing():
+    """The safe direction: an unchecked code goes to the shortlist rather than
+    into an order. Silence is not consent."""
+    items = [line(1, "bolts", "691284"), line(2, "more bolts", "691331")]
+
+    matched = await pipeline(BrokenLLM(LLMCallError("fake", RuntimeError("down")))).run(items, catalog())
+
+    assert [one.how for one in matched] == [CODE_REJECTED, CODE_REJECTED]
+    assert all(one.item_code is None for one in matched)
+
+
+async def test_a_judgement_the_model_skipped_does_not_shift_its_neighbours():
+    judge = Judging(drop={0})
+    items = [line(1, "bolts", "691284"), line(2, "more bolts", "691331")]
+
+    matched = await pipeline(judge).run(items, catalog())
+
+    assert matched[0].how == CODE_REJECTED, "unanswered, so not confirmed"
+    assert matched[1].how == CODE_CONFIRMED, "answered, and still its own answer"
+    assert matched[1].item_code == "T69133100"
+
+
+# --- what must hold for every run -----------------------------------------
 
 
 async def test_every_line_comes_back_in_the_order_it_arrived():
     items = [
-        line(1, "hexagon head bolts M16 X 65MM", "691284"),
-        line(2, "turbocharger cartridge"),
-        line(3, "hexagon head bolts M20 X 80MM", "691331"),
+        line(1, "hex head bolt m16", "691284"),
+        line(2, "nothing like anything"),
+        line(3, "external hdd", "110188"),
     ]
-    matched = await pipeline(
-        Restating(
-            "HEXAGON HEAD BOLTS FULL THREADED M16 X 65MM",
-            "TURBOCHARGER CARTRIDGE",
-            "HEXAGON HEAD BOLTS FULL THREADED M20 X 80MM",
-        )
-    ).run(items, catalog())
+
+    matched = await pipeline(Judging()).run(items, catalog())
 
     assert [one.index for one in matched] == [1, 2, 3]
-    assert [one.how for one in matched] == [CODE_CONFIRMED, NOTHING, CODE_CONFIRMED]
 
 
-async def test_the_verbatim_line_survives_the_restatement():
-    """Rule 7 of the project: what the customer wrote is not overwritten by
-    what we made of it. Both are on the record."""
-    items = [line(description="Hexagon Head Bolts Full Threaded (Bolt with Nut) M16*65")]
-    matched = await pipeline(Restating("HEXAGON HEAD BOLTS FULL THREADED M16 X 65MM")).run(
-        items, catalog()
-    )
+async def test_the_customers_own_words_survive_every_branch():
+    items = [
+        line(1, "Hexagon Head Bolts M16*65", "691284"),
+        line(2, "external hdd", "110188"),
+        line(3, "hex head bolt m20"),
+    ]
 
-    assert matched[0].verbatim == "Hexagon Head Bolts Full Threaded (Bolt with Nut) M16*65"
-    assert matched[0].description == "HEXAGON HEAD BOLTS FULL THREADED M16 X 65MM"
+    matched = await pipeline(
+        Judging(same=lambda customer, item: "HDD" not in customer)
+    ).run(items, catalog())
 
-
-async def test_a_describer_that_fails_falls_back_to_the_customers_own_words():
-    """The one model call left, and losing it must not lose the line."""
-    items = [line(description="Hexagon Head Bolts Full Threaded M16 X 65MM", code="691284")]
-    broken = BrokenLLM(LLMCallError("fake", TimeoutError("no answer")))
-
-    matched = await pipeline(broken).run(items, catalog())
-
-    assert matched[0].description == "Hexagon Head Bolts Full Threaded M16 X 65MM"
-    assert matched[0].how == CODE_CONFIRMED, "the customer's own words still agree"
+    assert [one.verbatim for one in matched] == [
+        "Hexagon Head Bolts M16*65",
+        "external hdd",
+        "hex head bolt m20",
+    ]
 
 
 async def test_an_empty_catalogue_matches_nothing_and_says_so():
-    items = [line(description="hexagon head bolts", code="691284")]
+    judge = Judging()
+    items = [line(1, "bolts", "691284"), line(2, "gloves")]
 
-    matched = await pipeline(Restating("HEXAGON HEAD BOLTS")).run(items, catalog(rows=[]))
+    matched = await pipeline(judge).run(items, Catalog([]))
 
-    assert matched[0].how == NOTHING
-    assert matched[0].why
-    assert len(matched) == 1, "the line still comes back"
+    assert [one.how for one in matched] == [NOTHING, NOTHING]
+    assert all("no catalogue" in one.why for one in matched)
+    assert judge.batches == []
 
 
 async def test_an_rfq_with_no_lines_costs_no_calls():
-    llm = Restating()
+    judge = Judging()
 
-    matched = await pipeline(llm).run([], catalog())
-
-    assert matched == []
-    assert not llm.calls
+    assert await pipeline(judge).run([], catalog()) == []
+    assert judge.batches == []
