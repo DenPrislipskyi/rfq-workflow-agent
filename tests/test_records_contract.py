@@ -106,7 +106,7 @@ MATCHING = [
     RecordedMatch(
         index=1,
         verbatim="Convex rulers",
-        description="RULE CONVEX",
+        query="",
         customer_code="650823",
         quantity="6",
         uom="pcs",
@@ -115,17 +115,17 @@ MATCHING = [
         item={"Item Code": "T65082300", "UOM": "PCS"},
         confidence=100,
         how="code_confirmed",
-        why="Descriptions agree (100%).",
+        why="The code names this row, and its two descriptions are the same product.",
     ),
     RecordedMatch(
         index=2,
         verbatim="Fire hose 2.5 inch",
-        description="FIRE HOSE 2.5 INCH",
+        query="FIRE HOSE 2 1/2 INCH RUBBER",
         customer_code="851163",
         quantity="4",
         uom="pcs",
         how="code_rejected",
-        why="Agrees only 0% - rejected.",
+        why="The code names T85116300, whose two descriptions are different products.",
         candidates=[
             RecordedCandidate(item_code="T610000022", confidence=100, item={"a": "1"}),
             RecordedCandidate(item_code="T610000024", confidence=85, item={"a": "2"}),
@@ -223,6 +223,10 @@ async def test_the_lines_come_back_in_order_with_their_candidates(store):
 
     first, second = found.matching
     assert first.how == "code_confirmed" and first.item_code == "T65082300"
+    # A confirmed code searched for nothing; an overruled one searched with the
+    # sheet's own wording for the row, which is not what the email said.
+    assert first.query == ""
+    assert second.query == "FIRE HOSE 2 1/2 INCH RUBBER" != second.verbatim
     assert first.item == {"Item Code": "T65082300", "UOM": "PCS"}
     assert first.candidates == []
     # The shortlist keeps the order the search ranked it in. Read off the
@@ -315,3 +319,85 @@ async def test_a_second_matching_run_replaces_the_first(store):
 async def test_reading_something_that_is_not_there_is_not_an_error(store):
     assert await store.read("2026-01-01T00-00-00Z__deadbeef") is None
     assert await store.file("2026-01-01T00-00-00Z__deadbeef", "x.xlsx") is None
+
+
+# --- confirming a line -----------------------------------------------------
+
+
+async def _with_lines(store) -> str:
+    record_id = await store.open(
+        email=email(), outcome=None, decision_id="b7d5d04d-1", source="outlook"
+    )
+    assert record_id is not None
+    await store.update(record_id, matching=MATCHING)
+    return record_id
+
+
+async def _line(store, record_id: str, index: int):
+    found = await store.read(record_id)
+    assert found is not None
+    return next(one for one in found.matching if one.index == index)
+
+
+async def test_a_line_starts_confirmed_by_nobody(store):
+    record_id = await _with_lines(store)
+
+    assert (await _line(store, record_id, 1)).confirmed_item_code is None
+
+
+async def test_a_line_can_be_settled_on_the_product_it_matched(store):
+    record_id = await _with_lines(store)
+
+    assert await store.confirm(record_id, 1, "T65082300") is True
+    assert (await _line(store, record_id, 1)).confirmed_item_code == "T65082300"
+
+
+async def test_a_line_can_be_settled_on_one_of_its_candidates(store):
+    """The whole point of the shortlist: the top one is a proposal, not a verdict."""
+    record_id = await _with_lines(store)
+
+    assert await store.confirm(record_id, 2, "T610000024") is True
+    assert (await _line(store, record_id, 2)).confirmed_item_code == "T610000024"
+
+
+async def test_a_store_does_not_judge_which_product_is_allowed(store):
+    """It cannot: a store holds records, not the sheet. And the shortlist is
+    not the only place a product may come from - somebody who finds none of
+    the five right picks the sixth by hand. Whether a code is a real product
+    is checked against the catalogue, in the endpoint."""
+    record_id = await _with_lines(store)
+
+    assert await store.confirm(record_id, 2, "T85116300") is True
+    assert (await _line(store, record_id, 2)).confirmed_item_code == "T85116300"
+
+
+async def test_changing_your_mind_clears_what_was_settled(store):
+    record_id = await _with_lines(store)
+    await store.confirm(record_id, 1, "T65082300")
+
+    assert await store.confirm(record_id, 1, None) is True
+    assert (await _line(store, record_id, 1)).confirmed_item_code is None
+
+
+async def test_clearing_what_is_already_clear_is_fine(store):
+    record_id = await _with_lines(store)
+
+    assert await store.confirm(record_id, 1, None) is True
+
+
+async def test_settling_one_line_leaves_the_others_alone(store):
+    record_id = await _with_lines(store)
+
+    await store.confirm(record_id, 1, "T65082300")
+
+    assert (await _line(store, record_id, 2)).confirmed_item_code is None
+
+
+async def test_a_line_that_is_not_there_cannot_be_settled(store):
+    record_id = await _with_lines(store)
+
+    assert await store.confirm(record_id, 99, "T65082300") is False
+
+
+async def test_a_record_that_is_not_there_cannot_be_settled(store):
+    assert await store.confirm("no-such-record", 1, "T65082300") is False

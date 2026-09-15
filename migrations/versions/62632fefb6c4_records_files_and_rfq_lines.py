@@ -1,8 +1,24 @@
 """records, files and rfq lines
 
-Revision ID: b9a56fb6ed53
+The whole schema in one revision. It replaces the first two - the original
+tables, and the rename of `rfq_lines.description` to `query` - because nothing
+had been deployed off them yet and a two-step history of a table that never
+existed anywhere but here is a history nobody will ever read.
+
+`rfq_lines` carries two columns worth naming:
+
+    query                the text the sheet was actually searched with, which
+                         is not the customer's sentence whenever a quoted code
+                         was overruled
+    confirmed_item_code  the product a person settled on. Null until somebody
+                         does, and null again when they change their mind: a
+                         line nobody confirmed and a line somebody un-confirmed
+                         are one state, not two.
+
+
+Revision ID: 62632fefb6c4
 Revises: 
-Create Date: 2026-09-13 22:30:50.558837
+Create Date: 2026-09-14 22:26:55.546997
 
 """
 from typing import Sequence, Union
@@ -12,7 +28,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = 'b9a56fb6ed53'
+revision: str = '62632fefb6c4'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -114,7 +130,7 @@ def upgrade() -> None:
     sa.Column('email_id', sa.String(length=64), nullable=False),
     sa.Column('index', sa.Integer(), nullable=False),
     sa.Column('verbatim', sa.Text(), nullable=False),
-    sa.Column('description', sa.Text(), nullable=False),
+    sa.Column('query', sa.Text(), nullable=False),
     sa.Column('customer_code', sa.String(length=64), nullable=True),
     sa.Column('quantity', sa.String(length=64), nullable=True),
     sa.Column('uom', sa.String(length=32), nullable=True),
@@ -122,6 +138,7 @@ def upgrade() -> None:
     sa.Column('item_description', sa.Text(), nullable=False),
     sa.Column('item', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
     sa.Column('confidence', sa.Integer(), nullable=True),
+    sa.Column('confirmed_item_code', sa.String(length=64), nullable=True),
     sa.Column('how', sa.String(length=32), nullable=False),
     sa.Column('why', sa.Text(), nullable=False),
     sa.Column('created_at', sa.TIMESTAMP(timezone=True), server_default=sa.text('now()'), nullable=False),
@@ -164,8 +181,4 @@ def downgrade() -> None:
     op.drop_table('email_deliveries')
     op.drop_index('emails_received_at_idx', table_name='emails')
     op.drop_table('emails')
-    # Autogenerate creates the enum type on the way up and forgets it on the
-    # way down, so a downgrade leaves it behind and the next upgrade fails with
-    # "type file_role_enum already exists". Dropped by hand.
-    sa.Enum(name='file_role_enum').drop(op.get_bind(), checkfirst=True)
     # ### end Alembic commands ###

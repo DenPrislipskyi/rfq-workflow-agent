@@ -133,10 +133,12 @@ class RecordedMatch(BaseModel):
     """
 
     index: int
-    # As the reader got it out of the file, and as we said it back. Both,
-    # because a match that turns out wrong is explained by the difference.
+    # As the reader got it out of the file, and the text the sheet was actually
+    # searched with. Both, because a match that turns out wrong is explained by
+    # the difference - and the two are not the same sentence whenever a quoted
+    # code was overruled: the search then runs on the sheet's own wording.
     verbatim: str = ""
-    description: str = ""
+    query: str = ""
     customer_code: str | None = None
     # As the customer wrote them, unconverted. The sheet has quantities and
     # units of its own; these are not those.
@@ -148,6 +150,8 @@ class RecordedMatch(BaseModel):
     # configured to describe products by. Resolved here so that nothing
     # downstream has to know the name of a column in somebody's spreadsheet.
     item_description: str = ""
+    # How much of what we searched for this product carries, 0-100. `None` on a
+    # confirmed code: there the code is the evidence, not the words.
     confidence: int | None = None
     item: dict[str, Any] = Field(default_factory=dict)
     # `code_confirmed`, `code_rejected`, `search` or `none`. The first thing an
@@ -159,6 +163,12 @@ class RecordedMatch(BaseModel):
     # against the list it was chosen from, and a refusal only means something
     # beside what it refused.
     candidates: list[RecordedCandidate] = Field(default_factory=list)
+    # The product a person settled on, and the only thing on this line they
+    # said rather than the agent. `None` is the whole of "nobody has confirmed
+    # this line" - there is no second flag to disagree with it - and the value
+    # is a code rather than a boolean because "confirmed" without "confirmed as
+    # what" is not something an order can be placed against.
+    confirmed_item_code: str | None = None
 
 
 class RecordedDelivery(BaseModel):
@@ -371,6 +381,32 @@ class EmailRecords:
             return
 
         self._changes.announce()
+
+    async def confirm(self, record_id: str, index: int, item_code: str | None) -> bool:
+        """Settle one line on a product, or unsettle it. True when it took."""
+        if not self._enabled:
+            return False
+
+        try:
+            async with self._lock:
+                folder = self._root / record_id
+                record = _read(folder / RECORD)
+                if record is None:
+                    return False
+
+                line = next((one for one in record.matching if one.index == index), None)
+                if line is None:
+                    return False
+
+                line.confirmed_item_code = item_code
+                record.updated_at = _now()
+                _write(folder / RECORD, record)
+        except Exception:
+            logger.exception("Could not confirm line %d of %s", index, record_id)
+            return False
+
+        self._changes.announce()
+        return True
 
     # --- reading ----------------------------------------------------------
 

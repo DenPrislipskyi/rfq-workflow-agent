@@ -65,6 +65,22 @@ class Records(Protocol):
         """
         ...
 
+    async def confirm(self, record_id: str, index: int, item_code: str | None) -> bool:
+        """Settle one line on a product, or unsettle it. True when it took.
+
+        False means there is no such record or no such line in it. Whether the
+        product exists is not asked here and cannot be: a store holds records,
+        not the sheet, and the shortlist is not the only place a product may
+        come from - a person who finds none of the five right goes and picks
+        the sixth by hand. The endpoint checks the code against the catalogue
+        before it gets this far.
+
+        `None` clears it, which is not a third state: a line nobody has settled
+        and a line somebody changed their mind about read the same, because
+        they are the same - there is nothing confirmed either way.
+        """
+        ...
+
     async def all(self) -> list[EmailRecord]:
         """Every record, newest first."""
         ...

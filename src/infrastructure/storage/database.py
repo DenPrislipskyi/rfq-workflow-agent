@@ -214,6 +214,29 @@ class DatabaseRecords:
 
         self._changes.announce()
 
+    async def confirm(self, record_id: str, index: int, item_code: str | None) -> bool:
+        """Settle one line on a product, or unsettle it. True when it took."""
+        if not self._enabled:
+            return False
+
+        try:
+            async with self._sessions() as session, session.begin():
+                row = await session.get(Email, record_id, options=_WHOLE)
+                if row is None:
+                    return False
+
+                line = next((one for one in row.lines if one.index == index), None)
+                if line is None:
+                    return False
+
+                line.confirmed_item_code = item_code
+        except Exception:
+            logger.exception("Could not confirm line %d of %s", index, record_id)
+            return False
+
+        self._changes.announce()
+        return True
+
     async def _replace_files(
         self, session: AsyncSession, row: Email, files: Sequence[SourceFile]
     ) -> None:
@@ -366,7 +389,7 @@ async def _replace_lines(
         RfqLine(
             index=line.index,
             verbatim=line.verbatim,
-            description=line.description,
+            query=line.query,
             customer_code=line.customer_code,
             quantity=line.quantity,
             uom=line.uom,
@@ -376,6 +399,7 @@ async def _replace_lines(
             confidence=line.confidence,
             how=line.how,
             why=line.why,
+            confirmed_item_code=line.confirmed_item_code,
             candidates=[
                 RfqLineCandidate(
                     rank=rank,
@@ -448,7 +472,7 @@ def _line(row: RfqLine) -> RecordedMatch:
     return RecordedMatch(
         index=row.index,
         verbatim=row.verbatim,
-        description=row.description,
+        query=row.query,
         customer_code=row.customer_code,
         quantity=row.quantity,
         uom=row.uom,
@@ -458,6 +482,7 @@ def _line(row: RfqLine) -> RecordedMatch:
         item=dict(row.item),
         how=row.how,
         why=row.why,
+        confirmed_item_code=row.confirmed_item_code,
         candidates=[
             RecordedCandidate(
                 item_code=one.item_code,

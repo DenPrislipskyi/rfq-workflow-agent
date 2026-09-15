@@ -283,10 +283,12 @@ class RfqLine(Base):
     # The line's number within the RFQ, as the reader numbered it.
     index: Mapped[int] = mapped_column(Integer)
 
-    # As the reader got it out of the file, and as we said it back. Both, because
-    # a match that turns out wrong is explained by the difference between them.
+    # As the reader got it out of the file, and the text the sheet was actually
+    # searched with. Both, because a match that turns out wrong is explained by
+    # the difference - and the two are different sentences whenever a quoted
+    # code was overruled: the search then runs on the sheet's own wording.
     verbatim: Mapped[str] = mapped_column(Text, default="")
-    description: Mapped[str] = mapped_column(Text, default="")
+    query: Mapped[str] = mapped_column(Text, default="")
     customer_code: Mapped[str | None] = mapped_column(String(64))
     # Text, not numbers: "1,5" and "2 coil" are what the customer wrote, and a
     # column typed as numeric would have to guess at both.
@@ -298,6 +300,10 @@ class RfqLine(Base):
     item_description: Mapped[str] = mapped_column(Text, default="")
     item: Mapped[dict] = mapped_column(JSONB, default=dict)
     confidence: Mapped[int | None] = mapped_column(Integer)
+    # What a person settled on. Null until somebody does, and null again the
+    # moment they change their mind: the screen calls the first state "Review
+    # Needed" and the second one is the same state, not a third.
+    confirmed_item_code: Mapped[str | None] = mapped_column(String(64))
 
     # `code_confirmed`, `code_rejected`, `search`, `none`. The first thing an
     # operator looks at: "their code was wrong" and "we found it by its words"
