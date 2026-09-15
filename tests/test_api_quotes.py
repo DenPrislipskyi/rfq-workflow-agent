@@ -9,13 +9,14 @@ and who wrote in, and a field nobody put there on purpose is a bug.
 import asyncio
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src import register_exceptions, register_routers
 from src.api import quotes
-from src.api.dependencies import get_changes, get_records
+from src.api.dependencies import get_catalog, get_changes, get_records
 from src.domain.enums import (
     DecisionPath,
     DeliveryOutcome,
@@ -34,6 +35,7 @@ from src.domain.models import (
     Signals,
     SplitThread,
 )
+from src.domain.rules.catalog import Catalog
 from src.infrastructure.documents.loader import SourceFile
 from src.infrastructure.storage.changes import Changes
 from src.infrastructure.storage.records import (
@@ -47,6 +49,24 @@ URL = "/api/v1/quotes"
 BODY = "Dear Sir/Madam, you may find attached our RFQ for Engine Materials."
 
 
+# The three products the confirmation tests are allowed to settle on. A code
+# outside this sheet is a code nobody sells, and the endpoint has to refuse it.
+SHEET = [
+    {"Item Code": "T69128400", "Item Description": "HEX HEAD BOLT/NUT, M16 X 65MM"},
+    {"Item Code": "T69133100", "Item Description": "HEX HEAD BOLT/NUT, M20 X 80MM"},
+    {"Item Code": "T85116300", "Item Description": "WELDER GLOVES FIVE FINGERS"},
+]
+
+
+def catalog() -> SimpleNamespace:
+    """Enough of `CatalogService` for the endpoint: the sheet it reads."""
+    return SimpleNamespace(
+        current=Catalog.from_rows(
+            SHEET, code_column="Item Code", description_column="Item Description"
+        )
+    )
+
+
 def client(records: EmailRecords, changes: Changes | None = None) -> TestClient:
     """The app without its lifespan: no Graph subscription, no `.env`."""
     signal = changes or Changes()
@@ -55,6 +75,7 @@ def client(records: EmailRecords, changes: Changes | None = None) -> TestClient:
     register_routers(app)
     app.dependency_overrides[get_records] = lambda: records
     app.dependency_overrides[get_changes] = lambda: signal
+    app.dependency_overrides[get_catalog] = catalog
     return TestClient(app)
 
 
@@ -242,7 +263,7 @@ async def test_an_rfq_reads_as_its_lines(tmp_path: Path):
             RecordedMatch(
                 index=1,
                 verbatim="Hexagon Head Bolts (Bolt with Nut) M16*65",
-                description="HEX HEAD BOLT NUT M16 X 65MM",
+                query="",
                 customer_code="691284",
                 quantity="500",
                 uom="set",
@@ -274,6 +295,92 @@ async def test_an_rfq_reads_as_its_lines(tmp_path: Path):
     # refused, and this is what the review panel reads.
     assert [one["confidence"] for one in line["candidates"]] == [98, 20]
     assert line["item"]["Price"] == "0.42"
+
+
+async def _rfq_with_a_shortlist(tmp_path: Path):
+    """One RFQ, one line, one proposal and one alternative behind it."""
+    records, record_id = await one_rfq(tmp_path)
+    await records.update(
+        record_id,
+        matching=[
+            RecordedMatch(
+                index=7,
+                verbatim="bolts hex head with nuts, full thread",
+                customer_code="",
+                how="search",
+                candidates=[
+                    RecordedCandidate(item_code="T69128400", confidence=100),
+                    RecordedCandidate(item_code="T69133100", confidence=78),
+                ],
+            )
+        ],
+    )
+    return records, record_id
+
+
+def _confirmation(record_id: str, index: int) -> str:
+    return f"{URL}/{record_id}/rfq/lines/{index}/confirmation"
+
+
+async def test_a_line_is_settled_on_one_of_its_candidates(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    assert page.put(_confirmation(record_id, 7), json={"itemCode": "T69133100"}).status_code == 204
+
+    line = page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+    assert line["confirmedItemCode"] == "T69133100"
+
+
+async def test_the_wire_carries_the_record_s_own_line_number(tmp_path: Path):
+    """The page numbers rows 1..n; the record keeps the reader's numbering, and
+    a confirmation is addressed by the second one. A screen that renumbers must
+    not re-point a confirmation at somebody else's product."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    line = client(records).get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+
+    assert (line["line"], line["index"]) == (1, 7)
+
+
+async def test_a_product_nobody_sells_is_a_404(tmp_path: Path):
+    """The check is the sheet, not the shortlist: a code no row carries must
+    never reach an order."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    assert page.put(_confirmation(record_id, 7), json={"itemCode": "T00000000"}).status_code == 404
+    assert page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]["confirmedItemCode"] == ""
+
+
+async def test_a_product_picked_by_hand_is_settled_though_it_was_never_offered(tmp_path: Path):
+    """The five candidates are a proposal. Somebody who finds none of them
+    right goes and picks the sixth, and that is the point of the picker."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    assert page.put(_confirmation(record_id, 7), json={"itemCode": "T85116300"}).status_code == 204
+
+    line = page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+    assert line["confirmedItemCode"] == "T85116300"
+    assert [one["itemCode"] for one in line["candidates"]] == ["T69128400", "T69133100"]
+
+
+async def test_changing_your_mind_clears_the_confirmation(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+    page.put(_confirmation(record_id, 7), json={"itemCode": "T69128400"})
+
+    assert page.delete(_confirmation(record_id, 7)).status_code == 204
+    assert page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]["confirmedItemCode"] == ""
+
+
+async def test_a_line_nobody_has_cannot_be_settled(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    response = client(records).put(_confirmation(record_id, 99), json={"itemCode": "T69128400"})
+
+    assert response.status_code == 404
 
 
 async def test_an_rfq_nobody_has_is_a_404(tmp_path: Path):
@@ -352,3 +459,37 @@ async def test_a_path_out_of_the_record_is_a_404(tmp_path: Path):
 
     assert client(records).get(f"{URL}/{record_id}/files/../../../.env").status_code == 404
     assert client(records).get(f"{URL}/nothing-here").status_code == 404
+
+
+async def test_a_settled_line_is_shown_as_what_it_was_settled_on(tmp_path: Path):
+    """The record keeps only the code. Its description, source and unit come
+    from today's sheet - a page showing last week's copy of them would be
+    showing something nobody sells."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+    page.put(_confirmation(record_id, 7), json={"itemCode": "T85116300"})
+
+    line = page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+
+    assert line["itemCode"] == "T85116300"
+    assert line["itemDescription"] == "WELDER GLOVES FIVE FINGERS"
+    assert line["confidence"] is None, "a person chose it; the number was not the reason"
+
+
+async def test_a_settled_candidate_keeps_the_score_it_was_shortlisted_with(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+    page.put(_confirmation(record_id, 7), json={"itemCode": "T69133100"})
+
+    line = page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+
+    assert (line["itemCode"], line["confidence"]) == ("T69133100", 78)
+
+
+async def test_an_unsettled_line_still_shows_what_the_agent_found(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    line = client(records).get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+
+    assert line["confirmedItemCode"] == ""
+    assert line["itemCode"] == "", "this line was searched, so the agent settled nothing"

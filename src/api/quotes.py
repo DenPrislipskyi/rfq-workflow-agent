@@ -24,8 +24,9 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
-from src.api.dependencies import ChangesDep, RecordsDep
+from src.api.dependencies import CatalogDep, ChangesDep, RecordsDep
 from src.domain.enums import DeliveryOutcome, EmailCategory, Priority
+from src.domain.rules.catalog import Catalog, CatalogItem, normalize_code
 from src.infrastructure.storage.changes import Changes
 from src.infrastructure.storage.records import EmailRecord, RecordedMatch
 
@@ -206,7 +207,14 @@ class MatchRow(Wire):
     point of the screen is comparing them.
     """
 
+    # Where it sits on the page, 1..n. What a person points at.
     line: int
+    # What the record calls this line, which is the reader's own numbering
+    # inside the file it came out of. The two are different on purpose, and
+    # this is the one the confirmation endpoint below is addressed by: a screen
+    # that renumbers rows must not re-point a confirmation at somebody else's
+    # product.
+    index: int = 0
     customer_code: str = ""
     customer_description: str = ""
     quantity: str = ""
@@ -222,6 +230,15 @@ class MatchRow(Wire):
     how: str = "none"
     why: str = ""
     candidates: list[MatchCandidate] = Field(default_factory=list)
+    # The product a person settled on. Empty until somebody does - and empty
+    # again once they change their mind, because those are one state.
+    confirmed_item_code: str = ""
+
+
+class Confirmation(Wire):
+    """Which product a person settled this line on."""
+
+    item_code: str
 
 
 class RfqDetail(Wire):
@@ -238,7 +255,7 @@ class RfqDetail(Wire):
 
 
 @router.get("/{record_id}/rfq", status_code=status.HTTP_200_OK)
-async def read_rfq(record_id: str, records: RecordsDep) -> RfqDetail:
+async def read_rfq(record_id: str, records: RecordsDep, catalog: CatalogDep) -> RfqDetail:
     """One RFQ, in the shape the matching screen reads.
 
     A view of the record rather than the record itself: `/{id}` below serves
@@ -257,8 +274,44 @@ async def read_rfq(record_id: str, records: RecordsDep) -> RfqDetail:
         port=_header(record, PORT),
         received_on=_received(record),
         subject=record.subject or "",
-        lines=[_line(number, match) for number, match in enumerate(record.matching, start=1)],
+        lines=[
+            _line(number, match, catalog.current)
+            for number, match in enumerate(record.matching, start=1)
+        ],
     )
+
+
+@router.put("/{record_id}/rfq/lines/{index}/confirmation", status_code=status.HTTP_204_NO_CONTENT)
+async def confirm_line(
+    record_id: str, index: int, body: Confirmation, records: RecordsDep, catalog: CatalogDep
+) -> Response:
+    """Settle one line on one product.
+
+    The product has to be **in the sheet**, and that is the whole of the check.
+    Not "on this line's shortlist": the five candidates are a proposal, and a
+    person who finds none of them right goes and picks the sixth by hand - that
+    is what the picker is for. What may not happen is a code nobody sells
+    reaching an order.
+
+    404 rather than 400: from the caller's side "there is no such thing here"
+    is the same answer whether the line is missing or the code is, and saying
+    which would only tell a guesser that they guessed half right.
+    """
+    found = catalog.current.by_code(body.item_code)
+    if found is None or normalize_code(found.code) != normalize_code(body.item_code):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such product")
+
+    if not await records.confirm(record_id, index, found.code):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such line")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/{record_id}/rfq/lines/{index}/confirmation", status_code=status.HTTP_204_NO_CONTENT)
+async def unconfirm_line(record_id: str, index: int, records: RecordsDep) -> Response:
+    """Un-settle one line. Idempotent: clearing what is already clear is fine."""
+    if not await records.confirm(record_id, index, None):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such line")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{record_id}", status_code=status.HTTP_200_OK)
@@ -320,18 +373,59 @@ def _row(record: EmailRecord) -> QuoteRow:
     )
 
 
-def _line(number: int, match: RecordedMatch) -> MatchRow:
+def _line(number: int, match: RecordedMatch, catalog: Catalog) -> MatchRow:
     """One matched line, as the page reads it.
 
     `line` is counted here rather than taken from the record: the reader
     numbers rows within the file it found them in, and a screen wants 1..n down
     the page. The record keeps its own numbering, which is what a warning about
     "row 14 of the requisition" refers to.
+
+    A settled line is shown as what it was settled on. The record keeps only
+    the code - the product it names is looked up in today's sheet, because the
+    sheet is where a product's description, source and unit live, and a page
+    showing last week's copy of them would be showing something nobody sells.
     """
+    settled = _settled(match, catalog)
+    if settled is not None:
+        return _showing(_unsettled(number, match), settled, match)
+    return _unsettled(number, match)
+
+
+def _settled(match: RecordedMatch, catalog: Catalog) -> CatalogItem | None:
+    """The product this line was settled on, as the sheet has it now."""
+    if not match.confirmed_item_code:
+        return None
+    found = catalog.by_code(match.confirmed_item_code)
+    return found if found is not None and found.code == match.confirmed_item_code else None
+
+
+def _showing(row: MatchRow, product: CatalogItem, match: RecordedMatch) -> MatchRow:
+    """The same line, showing the product a person settled it on.
+
+    Its score comes from the shortlist when it was on the shortlist, and is
+    nothing when it was picked by hand: a person chose it, and the number was
+    not the reason.
+    """
+    scored = next(
+        (one.confidence for one in match.candidates if one.item_code == product.code), None
+    )
+    return row.model_copy(
+        update={
+            "item_code": product.code,
+            "item_description": product.description,
+            "item": dict(product.fields),
+            "confidence": scored,
+        }
+    )
+
+
+def _unsettled(number: int, match: RecordedMatch) -> MatchRow:
     return MatchRow(
         line=number,
+        index=match.index,
         customer_code=match.customer_code or "",
-        customer_description=match.verbatim or match.description,
+        customer_description=match.verbatim or match.query,
         quantity=match.quantity or "",
         uom=match.uom or "",
         item_code=match.item_code or "",
@@ -340,6 +434,7 @@ def _line(number: int, match: RecordedMatch) -> MatchRow:
         confidence=match.confidence,
         how=match.how,
         why=match.why,
+        confirmed_item_code=match.confirmed_item_code or "",
         candidates=[
             MatchCandidate(
                 item_code=one.item_code,
