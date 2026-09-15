@@ -29,7 +29,7 @@ from src.services.catalog import CatalogService
 from src.services.classification.pipeline import ClassificationPipeline
 from src.services.extraction import ExtractionPipeline, FileReader, HeaderReader
 from src.services.handlers import ClassifyingEmailHandler
-from src.services.matching import LineDescriber, MatchingPipeline
+from src.services.matching import AgreementJudge, MatchingPipeline
 from src.services.notification_service import NotificationService
 from src.services.triage import EmailTriage
 from src.services.workbook import WorkbookBuilder
@@ -196,17 +196,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[LifespanState]:
 def build_matching(settings: Settings, llms: LLMRegistry) -> MatchingPipeline | None:
     """Stage D, or None when it is switched off.
 
-    The text model for both calls: restating a line and choosing between five
-    descriptions are questions about words, and neither of them opens a file.
+    The text model: whether two sentences describe one product is a question
+    about words, and answering it opens no file.
     """
     if not settings.MATCHING_ENABLED:
         logger.info("MATCHING_ENABLED=false - RFQ lines are not looked up in the catalogue")
         return None
 
     return MatchingPipeline(
-        LineDescriber(llms.text),
+        AgreementJudge(
+            llms.text,
+            batch=settings.MATCHING_JUDGE_BATCH,
+            concurrency=settings.MATCHING_JUDGE_CONCURRENCY,
+        ),
         candidates=settings.CATALOG_SHORTLIST,
-        agreement=settings.MATCHING_AGREEMENT_PERCENT,
     )
 
 
@@ -271,9 +274,9 @@ def build_catalog(settings: Settings, http_client: httpx.AsyncClient) -> Catalog
         sheet,
         Snapshot(settings.CATALOG_SNAPSHOT_PATH),
         code_column=settings.CATALOG_CODE_COLUMN,
-        description_column=settings.CATALOG_SHOWN_COLUMN,
+        description_column=settings.CATALOG_ITEM_DESCRIPTION_COLUMN,
         customer_code_column=settings.CATALOG_CUSTOMER_CODE_COLUMN,
-        customer_description_column=settings.CATALOG_SEARCH_COLUMN,
+        customer_description_column=settings.CATALOG_CUSTOMER_DESCRIPTION_COLUMN,
         refresh_minutes=settings.CATALOG_REFRESH_MINUTES,
     )
 

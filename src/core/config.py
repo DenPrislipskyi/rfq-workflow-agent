@@ -145,19 +145,23 @@ class Settings(BaseSettings):
     # Which columns carry the two things a match needs. Matched against the
     # sheet's own headings ignoring case and spacing.
     CATALOG_CODE_COLUMN: str = "Item Code"
-    # What the table shows and the record keeps as the product's name. Display
-    # only: it is never searched. `Internal item description` on the matching
-    # screen is this column, and so is `item_description` in the database.
-    CATALOG_SHOWN_COLUMN: str = "Item Description / SSG Description"
+    # Our own name for the product, and the column the search reads. A row of
+    # the sheet is one past mapping and mentions its customer's wording exactly
+    # once, so indexing that column instead means every row can be found only
+    # by the one sentence already in it: `catalog_recall` measures 2.4% against
+    # 97.6% for this one. It is also what the matching screen shows as
+    # `Internal item description` and what the record keeps as `item_description`.
+    CATALOG_ITEM_DESCRIPTION_COLUMN: str = "Item Description / SSG Description"
     # Optional, and worth setting when the sheet has one: a customer who quotes
     # any code at all usually quotes their own, not ours. It is a second way
     # into the same item, never a second answer - a code and a description are
     # two claims, and the shortlist says when they disagree.
     CATALOG_CUSTOMER_CODE_COLUMN: str = ""
-    # The column the search reads, and the only one it reads. A line of an RFQ
-    # is written by a customer, so what it resembles is how a customer asked
-    # for the same thing before - not our own shelf wording.
-    CATALOG_SEARCH_COLUMN: str = "Customer Description"
+    # How a customer once asked for this product. Not searched. It is one half
+    # of the question the judge answers - whether this row maps what it says it
+    # maps - and it is the query the sheet is searched with when the answer is
+    # no.
+    CATALOG_CUSTOMER_DESCRIPTION_COLUMN: str = "Customer Description"
     # How many candidates a line of an RFQ is shortlisted down to. This is the
     # ceiling on everything that comes after: a model cannot choose an item it
     # was never shown, so raise it before blaming the model.
@@ -166,15 +170,19 @@ class Settings(BaseSettings):
     # score the same - and every candidate past it is prompt spent on an option
     # nobody picks.
     CATALOG_SHORTLIST: int = 5
-    # Match each line of an RFQ against the catalogue. One model call per RFQ,
-    # whatever its size. Off leaves reading, forwarding and journalling exactly
-    # as they were - nothing downstream depends on a match yet, and the result
-    # goes into the record rather than into the form the desk receives.
+    # Match each line of an RFQ against the catalogue. Off leaves reading,
+    # forwarding and journalling exactly as they were - nothing downstream
+    # depends on a match yet, and the result goes into the record rather than
+    # into the form the desk receives.
     MATCHING_ENABLED: bool = True
-    # How much of a restated line has to appear in an item's own customer
-    # wording before the code that named it is taken at its word. Below it the
-    # code is dropped and the catalogue is searched by description instead.
-    MATCHING_AGREEMENT_PERCENT: float = 80.0
+    # Sheet rows judged per model call. Not a context limit - fifty pairs of
+    # these descriptions is about nine hundred tokens - but a limit on how long
+    # a numbered list a model answers without quietly dropping an entry, and on
+    # what one failed call costs.
+    MATCHING_JUDGE_BATCH: int = 50
+    # Batches in flight at once, so that a long RFQ costs the latency of one
+    # call rather than of four.
+    MATCHING_JUDGE_CONCURRENCY: int = 4
 
     # --- The browser ------------------------------------------------------------
     # Origins allowed to call this API from a page, comma separated. The front

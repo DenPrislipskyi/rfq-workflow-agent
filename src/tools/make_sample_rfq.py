@@ -73,9 +73,9 @@ async def main() -> int:
     catalog = Catalog.from_rows(
         Snapshot(settings.CATALOG_SNAPSHOT_PATH).rows(),
         code_column=settings.CATALOG_CODE_COLUMN,
-        description_column=settings.CATALOG_SHOWN_COLUMN,
+        description_column=settings.CATALOG_ITEM_DESCRIPTION_COLUMN,
         customer_code_column=settings.CATALOG_CUSTOMER_CODE_COLUMN,
-        customer_description_column=settings.CATALOG_SEARCH_COLUMN,
+        customer_description_column=settings.CATALOG_CUSTOMER_DESCRIPTION_COLUMN,
     )
     if not len(catalog):
         logger.error("No catalogue - run `python -m src.tools.sync_catalog` first")

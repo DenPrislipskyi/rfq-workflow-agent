@@ -18,14 +18,14 @@ from src.domain.rules.catalog import Catalog
 from src.infrastructure.llm.client import LLMResult
 from src.infrastructure.llm.exceptions import LLMCallError
 from src.infrastructure.storage.records import EmailRecords
-from src.services.matching import LineDescriber, MatchingPipeline
-from src.services.matching.schemas import RestatedLine, RestatedLines
+from src.services.matching import AgreementJudge, MatchingPipeline
+from src.services.matching.schemas import Judgement, Judgements
 from tests.fakes import BrokenLLM
 from tests.test_extraction_handler import Router, attachment, build_handler, message
 
 # The rope is the first line of the requisition every test reads back, and this
-# row is the sheet's record of a customer once asking for it. The wording in
-# `Customer Description` is what the search reads.
+# row is the sheet's record of a customer once asking for it. Both description
+# columns are filled, because whether they agree is the whole question.
 ROW = {
     "Sr #": "6",
     "Customer Code": "550101",
@@ -41,9 +41,9 @@ ROW = {
 def catalog(customer_description: str | None = None) -> Catalog:
     """The one-row sheet. `customer_description` is what it files the rope under.
 
-    A parameter because that column is now half of every comparison: a line
-    disagrees with the code it quotes only when the sheet says something else
-    about the product, and the requisition's own wording cannot be changed.
+    A parameter because that column is what the sheet is searched with once a
+    quoted code has been overruled, and the requisition's own wording cannot
+    be changed.
     """
     row = ROW if customer_description is None else ROW | {"Customer Description": customer_description}
     return Catalog.from_rows(
@@ -58,16 +58,16 @@ def catalog(customer_description: str | None = None) -> Catalog:
 class MatchingRouter(Router):
     """The handler's own double, plus an answer for the one matching call."""
 
-    def __init__(self, restated: str = "ROPE PP 24MM X 220M") -> None:
+    def __init__(self, same: bool = True) -> None:
         super().__init__()
-        self._restated = restated
+        self._same = same
 
     async def invoke(self, messages, schema):
-        if schema.__name__ == "RestatedLines":
+        if schema.__name__ == "Judgements":
             self.asked.append(schema.__name__)
             return LLMResult(
-                value=RestatedLines(
-                    lines=[RestatedLine(index=0, description=self._restated)]
+                value=Judgements(
+                    items=[Judgement(index=0, same=self._same, why="the judge said so")]
                 ),
                 model="fake",
                 latency_ms=1,
@@ -84,7 +84,7 @@ def build(tmp_path: Path, llm=None, matching_llm=None, shelf_wording: str | None
         llm=llm,
         records=records,
         matching=MatchingPipeline(
-            LineDescriber(matching_llm or llm),
+            AgreementJudge(matching_llm or llm),
             candidates=5,
         ),
         catalog=lambda: catalog(shelf_wording),
@@ -99,10 +99,10 @@ def recorded(tmp_path: Path) -> dict:
     return json.loads((folders[0] / "email.json").read_text(encoding="utf-8"))
 
 
-async def test_a_code_the_sheet_carries_is_confirmed_by_the_wording(tmp_path: Path):
-    """The first branch: the customer's code names an item, and our restated
-    line is already in that item's own customer wording. One product, no
-    shortlist - there was nothing to choose between."""
+async def test_a_row_that_agrees_with_itself_confirms_its_code(tmp_path: Path):
+    """The first branch: the customer's code names a row of the sheet, and that
+    row's own two descriptions are the same product. One product, no shortlist -
+    there was nothing to choose between."""
     handler, _, _ = build(tmp_path)
 
     await handler.handle(message(attachment()))
@@ -111,7 +111,7 @@ async def test_a_code_the_sheet_carries_is_confirmed_by_the_wording(tmp_path: Pa
     assert line["customer_code"] == "550101"
     assert line["item_code"] == "T55010100"
     assert line["how"] == "code_confirmed"
-    assert line["confidence"] == 100
+    assert line["confidence"] is None, "the code is the evidence here, not the words"
     assert line["candidates"] == [], "a confirmed code produces no shortlist"
 
 
@@ -128,16 +128,12 @@ async def test_the_whole_row_of_the_sheet_reaches_the_record(tmp_path: Path):
     assert line["item"]["Branch"].startswith("Seven Seas")
 
 
-async def test_a_code_whose_wording_disagrees_is_dropped_and_searched_instead(
+async def test_a_row_that_contradicts_itself_is_dropped_and_searched_instead(
     tmp_path: Path,
 ):
-    """The second branch, and the desk's own rule: the code named an item whose
-    customer wording is not what was asked for, so the code loses."""
-    handler, _, _ = build(
-        tmp_path,
-        llm=MatchingRouter("ANCHOR CHAIN STUD LINK 28MM"),
-        shelf_wording="FENDER PNEUMATIC 3300 X 6500",
-    )
+    """The second branch, and the desk's own rule: the code named a row that
+    maps the wrong thing, so the code loses."""
+    handler, _, _ = build(tmp_path, llm=MatchingRouter(same=False))
 
     await handler.handle(message(attachment()))
 
@@ -145,38 +141,50 @@ async def test_a_code_whose_wording_disagrees_is_dropped_and_searched_instead(
     assert line["how"] == "code_rejected"
     assert line["item_code"] is None, "the rejected code is not the answer"
     assert line["item"] == {}
-    assert "rejected" in line["why"]
+    assert "different products" in line["why"]
+    assert "the judge said so" in line["why"]
 
 
 async def test_a_candidate_carries_the_whole_row_too(tmp_path: Path):
     """A shortlisted product fills the same columns of the table as a confirmed
     one. A row with nothing in it is not a candidate anybody can judge."""
+    handler, _, _ = build(tmp_path, llm=MatchingRouter(same=False))
+
+    await handler.handle(message(attachment()))
+
+    line = recorded(tmp_path)["matching"][0]
+    assert [one["item_code"] for one in line["candidates"]] == ["T55010100"]
+    assert line["candidates"][0]["item"] == ROW
+    # Five of the seven words of "ROPE PP 24MM X 220M" are in "ROPE
+    # POLYPROPYLENE 24MM X 220MTR": rope, 24mm, 24, x and 220 - the last
+    # because a number welded to its unit also counts as the bare number, so
+    # `220M` and `220MTR` are not two different lengths. `pp` is not there.
+    assert line["candidates"][0]["confidence"] == 71
+
+
+async def test_the_line_keeps_both_what_was_written_and_what_was_searched_for(
+    tmp_path: Path,
+):
+    """And the customer's own quantity and unit, unconverted: the sheet has
+    units of its own and they are not these."""
     handler, _, _ = build(
-        tmp_path,
-        llm=MatchingRouter("ROPE NYLON BRAIDED 24MM HEAVY DUTY MARINE GRADE"),
-        shelf_wording="ROPE NYLON 24MM",
+        tmp_path, llm=MatchingRouter(same=False), shelf_wording="ROPE NYLON 24MM"
     )
 
     await handler.handle(message(attachment()))
 
     line = recorded(tmp_path)["matching"][0]
-    assert line["how"] == "code_rejected"
-    assert [one["item_code"] for one in line["candidates"]] == ["T55010100"]
-    assert line["candidates"][0]["item"] == ROW | {"Customer Description": "ROPE NYLON 24MM"}
-    assert line["candidates"][0]["confidence"] == 100, "the best of its own line"
+    assert line["quantity"] and line["uom"]
+    assert line["verbatim"] == "ROPE PP 24MM X 220M"
+    assert line["query"] == "ROPE NYLON 24MM", "the sheet's wording, not the email's"
 
 
-async def test_the_line_keeps_both_what_was_written_and_what_we_made_of_it(tmp_path: Path):
-    """And the customer's own quantity and unit, unconverted: the sheet has
-    units of its own and they are not these."""
-    handler, _, _ = build(tmp_path, llm=MatchingRouter("ROPE POLYPROP 24MM 220M"))
+async def test_a_confirmed_line_was_searched_for_nothing(tmp_path: Path):
+    handler, _, _ = build(tmp_path)
 
     await handler.handle(message(attachment()))
 
-    line = recorded(tmp_path)["matching"][0]
-    assert line["quantity"] and line["uom"]
-    assert line["description"] == "ROPE POLYPROP 24MM 220M"
-    assert line["verbatim"] and line["verbatim"] != line["description"]
+    assert recorded(tmp_path)["matching"][0]["query"] == ""
 
 
 async def test_a_line_the_catalogue_cannot_answer_keeps_its_reason(tmp_path: Path):
@@ -201,12 +209,12 @@ async def test_the_rfq_is_forwarded_before_anything_is_matched(tmp_path: Path):
 
     assert box.forwards
     asked = handler._triage._pipeline._llm.asked  # noqa: SLF001
-    assert asked.index("RestatedLines") == len(asked) - 1
+    assert asked.index("Judgements") == len(asked) - 1
 
 
 async def test_matching_that_fails_costs_the_email_nothing(tmp_path: Path):
-    """The restating call is the only model call left in matching, and losing
-    it falls back to the customer's own words rather than to no answer."""
+    """The judging call is the only model call left in matching, and losing it
+    confirms nothing rather than confirming blindly."""
     broken = BrokenLLM(LLMCallError("fake", TimeoutError("no answer")))
     handler, box, _ = build(tmp_path, matching_llm=broken)
 
@@ -217,6 +225,7 @@ async def test_matching_that_fails_costs_the_email_nothing(tmp_path: Path):
     assert written["delivery"]["outcome"] == "SENT"
     assert written["matching"], "every line still comes back"
     assert written["matching"][0]["verbatim"] == "ROPE PP 24MM X 220M"
+    assert written["matching"][0]["item_code"] is None, "an unchecked code is not trusted"
 
 
 async def test_an_email_that_is_not_an_rfq_is_never_matched(tmp_path: Path):

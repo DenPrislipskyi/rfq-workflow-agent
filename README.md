@@ -96,7 +96,6 @@ would need a service account, and `PublishedSheet` would grow an auth header.
 
 ```bash
 uv run python -m src.tools.sync_catalog      # copy the sheet now
-uv run python -m src.tools.describe_lines    # restate the customer wordings
 uv run python -m src.tools.catalog_recall    # how often the right item is found
 ```
 
@@ -196,7 +195,6 @@ uv run python -m src.tools.inspect_attachments <folder>     # what the parsers m
 uv run python -m src.tools.fill_template                    # fill a form from a sample
 uv run python -m src.tools.make_output_template <rfq.xlsx>  # a blank form from a filled one
 uv run python -m src.tools.sync_catalog                     # copy the product sheet
-uv run python -m src.tools.describe_lines                   # restate what customers wrote
 uv run python -m src.tools.catalog_recall                   # measure the shortlist
 uv run python -m src.tools.backfill_database                # records from the journal
 ```

@@ -670,7 +670,7 @@ def _recorded_match(line: MatchedLine) -> RecordedMatch:
     return RecordedMatch(
         index=line.index,
         verbatim=line.verbatim,
-        description=line.description,
+        query=line.query,
         customer_code=line.customer_code,
         quantity=line.quantity,
         uom=line.uom,
