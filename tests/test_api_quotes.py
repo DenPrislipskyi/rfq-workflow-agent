@@ -640,3 +640,141 @@ async def test_an_unsettled_line_still_shows_what_the_agent_found(tmp_path: Path
 
     assert line["confirmedItemCode"] == ""
     assert line["itemCode"] == "", "this line was searched, so the agent settled nothing"
+
+
+async def test_a_priced_line_carries_the_moment_the_price_arrived(tmp_path: Path):
+    """The responses screen dates a supplier's reply by this."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    page.put(_offer(record_id, 7), json={"unitPrice": 24.5})
+
+    assert page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]["offerReceivedAt"] is not None
+
+
+async def test_an_unpriced_line_carries_no_moment(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    line = client(records).get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+    assert line["offerReceivedAt"] is None
+
+
+async def test_a_withdrawn_offer_takes_its_moment_with_it(tmp_path: Path):
+    """A line with no price but a date on it would read as a reply we lost."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+    page.put(_offer(record_id, 7), json={"unitPrice": 24.5})
+
+    page.delete(_offer(record_id, 7))
+
+    assert page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]["offerReceivedAt"] is None
+
+
+def _inquiries(record_id: str) -> str:
+    return f"{URL}/{record_id}/rfq/inquiries"
+
+
+ASKED = {
+    "inquiries": [
+        {
+            "supplier": "Marinet Services Pte Ltd",
+            "body": "Dear Marinet Services Pte Ltd,\n\nKindly quote the following item(s).",
+            "lines": [7],
+        }
+    ]
+}
+
+
+async def test_an_rfq_starts_with_nobody_having_been_asked(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    assert client(records).get(f"{URL}/{record_id}/rfq").json()["inquiries"] == []
+
+
+async def test_the_letter_that_went_to_a_supplier_is_kept_whole(tmp_path: Path):
+    """The text is editable before it goes, so the sentence that was sent is
+    the one worth keeping - not the one the template would rebuild."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    assert page.put(_inquiries(record_id), json=ASKED).status_code == 204
+
+    sent = page.get(f"{URL}/{record_id}/rfq").json()["inquiries"]
+    assert len(sent) == 1
+    assert sent[0]["supplier"] == "Marinet Services Pte Ltd"
+    assert sent[0]["body"].startswith("Dear Marinet Services Pte Ltd,")
+    assert sent[0]["lines"] == [7]
+    assert sent[0]["sentAt"] is not None, "the server dates it, not the browser"
+
+
+async def test_the_inquiries_go_out_once(tmp_path: Path):
+    """The screen greys its button out for the same reason. A rule that lives
+    only in a button is not one."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+    page.put(_inquiries(record_id), json=ASKED)
+
+    second = {"inquiries": [{"supplier": "Hansa Technik", "body": "Dear Hansa,", "lines": [7]}]}
+    assert page.put(_inquiries(record_id), json=second).status_code == 409
+
+    sent = page.get(f"{URL}/{record_id}/rfq").json()["inquiries"]
+    assert [one["supplier"] for one in sent] == ["Marinet Services Pte Ltd"]
+
+
+async def test_every_letter_of_one_send_lands_together(tmp_path: Path):
+    """One click sends them all, and half of them on the record would describe
+    a send that never happened."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    page.put(
+        _inquiries(record_id),
+        json={
+            "inquiries": [
+                {"supplier": "Marinet Services Pte Ltd", "body": "Dear Marinet,", "lines": [7]},
+                {"supplier": "Hansa Technik", "body": "Dear Hansa,", "lines": [7]},
+            ]
+        },
+    )
+
+    sent = page.get(f"{URL}/{record_id}/rfq").json()["inquiries"]
+    assert {one["supplier"] for one in sent} == {"Marinet Services Pte Ltd", "Hansa Technik"}
+
+
+async def test_an_rfq_that_is_not_there_cannot_be_asked(tmp_path: Path):
+    records, _ = await _rfq_with_a_shortlist(tmp_path)
+
+    assert client(records).put(_inquiries("no-such-rfq"), json=ASKED).status_code == 409
+
+
+async def test_a_letter_that_could_not_be_one_is_refused(tmp_path: Path):
+    """Guards rather than rules: what a person writes is theirs, and these
+    only refuse what no letter could be."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    assert page.put(_inquiries(record_id), json={"inquiries": []}).status_code == 422
+    assert (
+        page.put(
+            _inquiries(record_id), json={"inquiries": [{"supplier": "", "body": "x", "lines": []}]}
+        ).status_code
+        == 422
+    )
+    assert (
+        page.put(
+            _inquiries(record_id), json={"inquiries": [{"supplier": "A", "body": "", "lines": []}]}
+        ).status_code
+        == 422
+    )
+    assert page.get(f"{URL}/{record_id}/rfq").json()["inquiries"] == []
+
+
+async def test_asking_the_suppliers_leaves_the_lines_alone(tmp_path: Path):
+    """Two different screens, and neither write may disturb the other."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+    page.put(_confirmation(record_id, 7), json={"itemCode": "T69133100"})
+
+    page.put(_inquiries(record_id), json=ASKED)
+
+    assert page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]["confirmedItemCode"] == "T69133100"

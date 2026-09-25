@@ -172,12 +172,39 @@ class RecordedMatch(BaseModel):
     # the quantity is ours, and multiplying here would bake our own arithmetic
     # into what they actually said.
     offer_unit_price: float | None = None
+    # When that price arrived. Stamped beside the price and cleared with it:
+    # a line has one offer, and an offer has one moment it came in.
+    #
+    # The server's clock rather than the caller's. A supplier's reply is dated
+    # by when we received it, and a browser whose clock is a day out must not
+    # be able to date one.
+    offer_received_at: datetime | None = None
     # The product a person settled on, and the only thing on this line they
     # said rather than the agent. `None` is the whole of "nobody has confirmed
     # this line" - there is no second flag to disagree with it - and the value
     # is a code rather than a boolean because "confirmed" without "confirmed as
     # what" is not something an order can be placed against.
     confirmed_item_code: str | None = None
+
+
+class RecordedInquiry(BaseModel):
+    """One request for a quote, as it went out to one supplier.
+
+    Kept whole rather than as a template plus its arguments: the text is
+    editable before it goes, and what was asked is the sentence that was
+    actually sent - not the one a later version of the template would build
+    from the same record.
+    """
+
+    # The firm, which is also the key. The sheet carries no other identifier
+    # for a supplier, and one letter goes to each.
+    supplier: str
+    body: str
+    sent_at: datetime
+    # Which lines it asked about, by their index in the record. Their numbers
+    # on the page are the page's, and a screen that renumbers rows must not
+    # be able to repoint a letter that has already gone.
+    lines: list[int] = Field(default_factory=list)
 
 
 class RecordedDelivery(BaseModel):
@@ -233,6 +260,11 @@ class EmailRecord(BaseModel):
     # One entry per line of the RFQ, matched or refused. Empty when the RFQ was
     # never read, or when matching is switched off.
     matching: list[RecordedMatch] = Field(default_factory=list)
+    # What was asked of the suppliers, one entry per firm. Empty until
+    # somebody sends the inquiries, and it stays as sent: the letters go out
+    # once, and a record of what was sent that could be rewritten afterwards
+    # would not be a record of it.
+    inquiries: list[RecordedInquiry] = Field(default_factory=list)
     delivery: RecordedDelivery | None = None
     form: RecordedFile | None = None
     # Set when the pipeline raised on this email. The record exists either way:
@@ -404,19 +436,53 @@ class EmailRecords:
 
     async def confirm(self, record_id: str, index: int, item_code: str | None) -> bool:
         """Settle one line on a product, or unsettle it. True when it took."""
-        return await self._set(record_id, index, "confirmed_item_code", item_code)
+        return await self._set(record_id, index, confirmed_item_code=item_code)
 
     async def price(self, record_id: str, index: int, unit_price: float | None) -> bool:
-        """Record what a supplier quoted for one unit of a line."""
-        return await self._set(record_id, index, "offer_unit_price", unit_price)
+        """Record what a supplier quoted for one unit of a line, and when."""
+        return await self._set(
+            record_id,
+            index,
+            offer_unit_price=unit_price,
+            offer_received_at=_now() if unit_price is not None else None,
+        )
 
-    async def _set(self, record_id: str, index: int, field: str, value: object) -> bool:
-        """Set one field of one line, and say whether there was a line to set.
+    async def inquire(self, record_id: str, inquiries: Sequence[RecordedInquiry]) -> bool:
+        """Record the letters that went to the suppliers. True when it took.
 
-        The two writes a person makes on the matching screen differ in one
-        word each - which field, and what goes in it - so they are one method
-        with the difference passed in, rather than two bodies that have to be
-        kept identical.
+        False for a record that has none, and false for one that already has
+        them: the inquiries go out once, and a second send would rewrite the
+        text a supplier is at that moment reading.
+        """
+        if not self._enabled:
+            return False
+
+        try:
+            async with self._lock:
+                folder = self._root / record_id
+                record = _read(folder / RECORD)
+                if record is None or record.inquiries:
+                    return False
+
+                record.inquiries = list(inquiries)
+                record.updated_at = _now()
+                _write(folder / RECORD, record)
+        except Exception:
+            logger.exception("Could not record the inquiries of %s", record_id)
+            return False
+
+        self._changes.announce()
+        return True
+
+    async def _set(self, record_id: str, index: int, **fields: object) -> bool:
+        """Set fields of one line, and say whether there was a line to set.
+
+        The two writes a person makes on the sourcing screens differ in which
+        fields they touch and what goes in them, so they are one method with
+        the difference passed in, rather than two bodies that have to be kept
+        identical. Every field lands in the same write: a price and the moment
+        it arrived are one fact, and a reader must never catch one without
+        the other.
         """
         if not self._enabled:
             return False
@@ -432,11 +498,12 @@ class EmailRecords:
                 if line is None:
                     return False
 
-                setattr(line, field, value)
+                for field, value in fields.items():
+                    setattr(line, field, value)
                 record.updated_at = _now()
                 _write(folder / RECORD, record)
         except Exception:
-            logger.exception("Could not set %s on line %d of %s", field, index, record_id)
+            logger.exception("Could not set line %d of %s", index, record_id)
             return False
 
         self._changes.announce()

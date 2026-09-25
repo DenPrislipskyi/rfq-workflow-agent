@@ -5,6 +5,7 @@ from src.infrastructure.db.models import (
     EmailFile,
     EmailVerdict,
     FileRole,
+    RfqInquiry,
     RfqLine,
     RfqLineCandidate,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "EmailFile",
     "EmailVerdict",
     "FileRole",
+    "RfqInquiry",
     "RfqLine",
     "RfqLineCandidate",
 ]

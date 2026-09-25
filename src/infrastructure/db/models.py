@@ -147,6 +147,11 @@ class Email(Base):
         cascade="all, delete-orphan",
         order_by="RfqLine.index",
     )
+    inquiries: Mapped[list["RfqInquiry"]] = relationship(
+        back_populates="email",
+        cascade="all, delete-orphan",
+        order_by="RfqInquiry.supplier",
+    )
 
     __table_args__ = (
         UniqueConstraint("message_id", name="emails_message_id_key"),
@@ -324,6 +329,10 @@ class RfqLine(Base):
     # answers. `Numeric` rather than `Float`: this is money, and money that
     # rounds differently on two machines is money somebody argues about.
     offer_unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    # When that price came in. Beside the price rather than on the supplier:
+    # a supplier answers about lines, and a reply that covered two of three
+    # would date the third one too.
+    offer_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # `code_confirmed`, `code_rejected`, `search`, `none`. The first thing an
     # operator looks at: "their code was wrong" and "we found it by its words"
@@ -341,6 +350,40 @@ class RfqLine(Base):
     __table_args__ = (
         # The reader numbers lines within one RFQ, so the pair is the identity.
         UniqueConstraint("email_id", "index", name="rfq_lines_email_id_index_key"),
+    )
+
+
+class RfqInquiry(Base):
+    """One request for a quote, as it went out to one supplier.
+
+    The text is kept whole. It is editable before it goes, and the sentence
+    that was actually sent is the one worth keeping - not the one today's
+    template would rebuild from the same lines.
+
+    No email address: the sheet carries none, so the firm's name is both the
+    address and the identity, and one letter goes to each.
+    """
+
+    __tablename__ = "rfq_inquiries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email_id: Mapped[str] = mapped_column(
+        ForeignKey("emails.id", ondelete="CASCADE"), index=True
+    )
+    supplier: Mapped[str] = mapped_column(String(256))
+    body: Mapped[str] = mapped_column(Text, default="")
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Which lines it asked about, by their index in the record. A list rather
+    # than a join table: nothing is ever queried by it, and the letter is read
+    # as a whole or not at all.
+    lines: Mapped[list[int]] = mapped_column(JSONB, default=list)
+
+    email: Mapped[Email] = relationship(back_populates="inquiries")
+
+    __table_args__ = (
+        # One letter per supplier per RFQ. Two would be the mistake the
+        # grouping exists to prevent, arriving by a different door.
+        UniqueConstraint("email_id", "supplier", name="rfq_inquiries_email_id_supplier_key"),
     )
 
 

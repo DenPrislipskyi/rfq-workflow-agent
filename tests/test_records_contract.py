@@ -41,6 +41,7 @@ from src.infrastructure.storage.records import (
     RecordedCandidate,
     RecordedDelivery,
     RecordedExtraction,
+    RecordedInquiry,
     RecordedMatch,
 )
 
@@ -542,3 +543,95 @@ async def test_a_line_that_is_not_there_cannot_be_priced(store):
 
 async def test_a_record_that_is_not_there_cannot_be_priced(store):
     assert await store.price("no-such-record", 1, 24.5) is False
+
+
+async def test_a_price_arrives_at_a_moment(store):
+    """The screen dates a supplier's reply by this, so it has to be there."""
+    record_id = await _with_lines(store)
+    before = datetime.now(UTC)
+
+    await store.price(record_id, 1, 24.5)
+
+    received = (await _line(store, record_id, 1)).offer_received_at
+    assert received is not None
+    assert before <= received <= datetime.now(UTC)
+
+
+async def test_an_unpriced_line_has_no_moment(store):
+    record_id = await _with_lines(store)
+
+    assert (await _line(store, record_id, 1)).offer_received_at is None
+
+
+async def test_withdrawing_an_offer_takes_its_moment_with_it(store):
+    """A line with no price but a date on it would read as a reply we lost."""
+    record_id = await _with_lines(store)
+    await store.price(record_id, 1, 24.5)
+
+    await store.price(record_id, 1, None)
+
+    assert (await _line(store, record_id, 1)).offer_received_at is None
+
+
+def _asking(supplier: str = "Marinet Services Pte Ltd", *lines: int) -> RecordedInquiry:
+    return RecordedInquiry(
+        supplier=supplier,
+        body=f"Dear {supplier},\n\nKindly quote the following item(s).",
+        sent_at=datetime(2026, 9, 25, 11, 4, tzinfo=UTC),
+        lines=list(lines) or [1],
+    )
+
+
+async def test_a_record_starts_with_nobody_having_been_asked(store):
+    record_id = await _with_lines(store)
+
+    assert (await store.read(record_id)).inquiries == []
+
+
+async def test_a_record_keeps_the_letter_that_went_to_a_supplier(store):
+    record_id = await _with_lines(store)
+
+    assert await store.inquire(record_id, [_asking("Marinet Services Pte Ltd", 1, 2)]) is True
+
+    sent = (await store.read(record_id)).inquiries
+    assert len(sent) == 1
+    assert sent[0].supplier == "Marinet Services Pte Ltd"
+    assert sent[0].body.startswith("Dear Marinet Services Pte Ltd,")
+    assert sent[0].lines == [1, 2]
+    assert sent[0].sent_at == datetime(2026, 9, 25, 11, 4, tzinfo=UTC)
+
+
+async def test_every_letter_of_one_send_lands_together(store):
+    record_id = await _with_lines(store)
+
+    await store.inquire(record_id, [_asking("Marinet Services Pte Ltd", 1), _asking("Hansa", 2)])
+
+    assert {one.supplier for one in (await store.read(record_id)).inquiries} == {
+        "Marinet Services Pte Ltd",
+        "Hansa",
+    }
+
+
+async def test_the_letters_go_out_once(store):
+    """A second send would rewrite the text a supplier is at that moment reading."""
+    record_id = await _with_lines(store)
+    await store.inquire(record_id, [_asking("Marinet Services Pte Ltd", 1)])
+
+    assert await store.inquire(record_id, [_asking("Hansa", 2)]) is False
+
+    sent = (await store.read(record_id)).inquiries
+    assert [one.supplier for one in sent] == ["Marinet Services Pte Ltd"]
+
+
+async def test_a_record_that_is_not_there_cannot_be_asked(store):
+    assert await store.inquire("no-such-record", [_asking()]) is False
+
+
+async def test_asking_the_suppliers_leaves_the_lines_alone(store):
+    """Two different screens, and neither write may disturb the other."""
+    record_id = await _with_lines(store)
+    await store.confirm(record_id, 1, "T65082300")
+
+    await store.inquire(record_id, [_asking("Marinet Services Pte Ltd", 1)])
+
+    assert (await _line(store, record_id, 1)).confirmed_item_code == "T65082300"

@@ -17,6 +17,7 @@ read - is in the record, one line away from being shown.
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Mapping
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -28,7 +29,7 @@ from src.api.dependencies import CatalogDep, ChangesDep, RecordsDep
 from src.domain.enums import DeliveryOutcome, EmailCategory, Priority
 from src.domain.rules.catalog import Catalog, CatalogItem, normalize_code
 from src.infrastructure.storage.changes import Changes
-from src.infrastructure.storage.records import EmailRecord, RecordedMatch
+from src.infrastructure.storage.records import EmailRecord, RecordedInquiry, RecordedMatch
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,15 @@ MAX_PAGE_SIZE = 500
 # The most a single unit may be quoted at. Not a business rule - a guard
 # against a number nobody meant to type.
 MOST_A_UNIT_COSTS = 10_000_000.0
+
+# Bounds on a letter to a supplier, and on how many go at once. All three are
+# guards rather than rules: the text is a person's to write, and these only
+# refuse what no letter could be. The sheet's longest supplier name is far
+# inside the first, and an RFQ that named more firms than the third would have
+# more suppliers than lines.
+MOST_A_SUPPLIER_IS_CALLED = 256
+MOST_A_LETTER_RUNS = 20_000
+MOST_SUPPLIERS_ASKED = 200
 
 # How long the stream stays silent before it says something anyway. Proxies and
 # load balancers close a connection that has sent nothing for a minute or two,
@@ -246,6 +256,9 @@ class MatchRow(Wire):
     # answers; the quantity is the customer's, and the total is the screen's
     # arithmetic rather than anything a supplier said.
     offer_unit_price: float | None = None
+    # When that price arrived. Null wherever the price is: the screen dates a
+    # supplier's reply by this, and a reply nobody has had has no date.
+    offer_received_at: datetime | None = None
 
 
 class Confirmation(Wire):
@@ -267,6 +280,35 @@ class Offer(Wire):
     unit_price: float = Field(gt=0, le=MOST_A_UNIT_COSTS)
 
 
+class Inquiry(Wire):
+    """One letter a person is sending to one supplier.
+
+    The text arrives whole because it is editable on the screen: rebuilding it
+    here from a template would record the letter we would have written rather
+    than the one that went.
+    """
+
+    supplier: str = Field(min_length=1, max_length=MOST_A_SUPPLIER_IS_CALLED)
+    body: str = Field(min_length=1, max_length=MOST_A_LETTER_RUNS)
+    lines: list[int] = Field(default_factory=list)
+
+
+class Inquiries(Wire):
+    """Every letter of one send, together.
+
+    A list rather than a call per supplier: one click sends them all, and half
+    of them on the record would describe a send that never happened.
+    """
+
+    inquiries: list[Inquiry] = Field(min_length=1, max_length=MOST_SUPPLIERS_ASKED)
+
+
+class SentInquiry(Inquiry):
+    """One letter, as the record kept it. `sent_at` is the server's."""
+
+    sent_at: datetime
+
+
 class RfqDetail(Wire):
     """One RFQ as its own page reads it."""
 
@@ -282,6 +324,9 @@ class RfqDetail(Wire):
     received_on: str = ""
     subject: str = ""
     lines: list[MatchRow] = Field(default_factory=list)
+    # What was asked of the suppliers. Empty until somebody sends them, and it
+    # is what stops the screen offering to send them a second time.
+    inquiries: list[SentInquiry] = Field(default_factory=list)
 
 
 @router.get("/{record_id}/rfq", status_code=status.HTTP_200_OK)
@@ -308,6 +353,15 @@ async def read_rfq(record_id: str, records: RecordsDep, catalog: CatalogDep) -> 
         lines=[
             _line(number, match, catalog.current)
             for number, match in enumerate(record.matching, start=1)
+        ],
+        inquiries=[
+            SentInquiry(
+                supplier=one.supplier,
+                body=one.body,
+                lines=list(one.lines),
+                sent_at=one.sent_at,
+            )
+            for one in record.inquiries
         ],
     )
 
@@ -342,6 +396,46 @@ async def unconfirm_line(record_id: str, index: int, records: RecordsDep) -> Res
     """Un-settle one line. Idempotent: clearing what is already clear is fine."""
     if not await records.confirm(record_id, index, None):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such line")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/{record_id}/rfq/inquiries", status_code=status.HTTP_204_NO_CONTENT)
+async def send_inquiries(record_id: str, body: Inquiries, records: RecordsDep) -> Response:
+    """Record the letters that went to the suppliers.
+
+    Nothing leaves the building. What this writes down is what a person
+    composed and pressed send on, which is the part anybody later asks about:
+    a supplier who quotes the wrong item is answered by the letter they were
+    sent, not by the template it started as.
+
+    **Once.** A record that already carries inquiries is a 409, and that is
+    the whole rule - the screen greys its button out for the same reason, and
+    a rule that lives only in a button is not one. Resending would rewrite the
+    text a supplier is at that moment reading.
+
+    `sent_at` is the server's clock. A browser whose clock is a day out must
+    not be able to date a letter.
+
+    One letter per supplier is not checked here: the grouping that produces
+    them is the screen's, and the store's unique constraint is what actually
+    refuses a second one.
+    """
+    sent = _now()
+    recorded = [
+        RecordedInquiry(
+            supplier=one.supplier,
+            body=one.body,
+            lines=list(one.lines),
+            sent_at=sent,
+        )
+        for one in body.inquiries
+    ]
+
+    if not await records.inquire(record_id, recorded):
+        # One status for two answers, deliberately: "no such RFQ" and "already
+        # sent" are both "this send is not going to happen", and the caller
+        # does the same thing about either - it rereads the record.
+        raise HTTPException(status.HTTP_409_CONFLICT, "These inquiries have already gone")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -511,6 +605,7 @@ def _unsettled(number: int, match: RecordedMatch, catalog: Catalog) -> MatchRow:
         why=match.why,
         confirmed_item_code=match.confirmed_item_code or "",
         offer_unit_price=match.offer_unit_price,
+        offer_received_at=match.offer_received_at,
         candidates=[
             MatchCandidate(
                 item_code=one.item_code,
@@ -591,3 +686,8 @@ def _haystack(row: QuoteRow) -> str:
     """What `search` looks through. The sender and the labels, because those
     are the two columns that carry anything to search."""
     return " ".join([row.customer_name, *row.labels]).lower()
+
+
+def _now() -> datetime:
+    """The server's clock, which is the only one that may date a letter."""
+    return datetime.now(UTC)

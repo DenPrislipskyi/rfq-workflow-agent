@@ -1,6 +1,6 @@
 """The record store, in Postgres, with the bytes in blob storage.
 
-The other half of `records.py`. Same five methods, same `EmailRecord` going in
+The other half of `records.py`. Same six methods, same `EmailRecord` going in
 and coming out - what changes is where it lands: rows instead of a JSON file,
 and a container instead of the folder beside it.
 
@@ -41,6 +41,7 @@ from src.infrastructure.db import (
     EmailFile,
     EmailVerdict,
     FileRole,
+    RfqInquiry,
     RfqLine,
     RfqLineCandidate,
 )
@@ -58,10 +59,12 @@ from src.infrastructure.storage.records import (
     RecordedDelivery,
     RecordedExtraction,
     RecordedFile,
+    RecordedInquiry,
     RecordedMatch,
     RecordedVerdict,
     _address,
     _is_rfq,
+    _now,
     _record_id,
     _reference,
     _safe_name,
@@ -85,6 +88,7 @@ _WHOLE = (
     selectinload(Email.delivery),
     selectinload(Email.files),
     selectinload(Email.lines).selectinload(RfqLine.candidates),
+    selectinload(Email.inquiries),
 )
 
 
@@ -226,19 +230,58 @@ class DatabaseRecords:
 
     async def confirm(self, record_id: str, index: int, item_code: str | None) -> bool:
         """Settle one line on a product, or unsettle it. True when it took."""
-        return await self._set(record_id, index, "confirmed_item_code", item_code)
+        return await self._set(record_id, index, confirmed_item_code=item_code)
 
     async def price(self, record_id: str, index: int, unit_price: float | None) -> bool:
-        """Record what a supplier quoted for one unit of a line."""
-        return await self._set(record_id, index, "offer_unit_price", unit_price)
+        """Record what a supplier quoted for one unit of a line, and when."""
+        return await self._set(
+            record_id,
+            index,
+            offer_unit_price=unit_price,
+            offer_received_at=_now() if unit_price is not None else None,
+        )
 
-    async def _set(self, record_id: str, index: int, field: str, value: object) -> bool:
-        """Set one field of one line, and say whether there was a line to set.
+    async def inquire(self, record_id: str, inquiries: Sequence[RecordedInquiry]) -> bool:
+        """Record the letters that went to the suppliers. True when it took.
 
-        The two writes a person makes on the matching screen differ in one
-        word each - which field, and what goes in it - so they are one method
-        with the difference passed in, rather than two bodies that have to be
-        kept identical.
+        False for a record that has none, and false for one that already has
+        them: the inquiries go out once, and a second send would rewrite the
+        text a supplier is at that moment reading.
+        """
+        if not self._enabled:
+            return False
+
+        try:
+            async with self._sessions() as session, session.begin():
+                row = await session.get(Email, record_id, options=_WHOLE)
+                if row is None or row.inquiries:
+                    return False
+
+                row.inquiries = [
+                    RfqInquiry(
+                        supplier=one.supplier,
+                        body=one.body,
+                        sent_at=one.sent_at,
+                        lines=list(one.lines),
+                    )
+                    for one in inquiries
+                ]
+        except Exception:
+            logger.exception("Could not record the inquiries of %s", record_id)
+            return False
+
+        self._changes.announce()
+        return True
+
+    async def _set(self, record_id: str, index: int, **fields: object) -> bool:
+        """Set fields of one line, and say whether there was a line to set.
+
+        The two writes a person makes on the sourcing screens differ in which
+        fields they touch and what goes in them, so they are one method with
+        the difference passed in, rather than two bodies that have to be kept
+        identical. Every field lands in the same transaction: a price and the
+        moment it arrived are one fact, and a reader must never catch one
+        without the other.
         """
         if not self._enabled:
             return False
@@ -253,9 +296,10 @@ class DatabaseRecords:
                 if line is None:
                     return False
 
-                setattr(line, field, value)
+                for field, value in fields.items():
+                    setattr(line, field, value)
         except Exception:
-            logger.exception("Could not set %s on line %d of %s", field, index, record_id)
+            logger.exception("Could not set line %d of %s", index, record_id)
             return False
 
         self._changes.announce()
@@ -487,6 +531,15 @@ def _record(row: Email) -> EmailRecord:
         if row.extraction
         else None,
         matching=[_line(one) for one in row.lines],
+        inquiries=[
+            RecordedInquiry(
+                supplier=one.supplier,
+                body=one.body,
+                sent_at=one.sent_at,
+                lines=list(one.lines),
+            )
+            for one in row.inquiries
+        ],
         delivery=RecordedDelivery.model_validate(row.delivery, from_attributes=True)
         if row.delivery
         else None,
@@ -523,6 +576,7 @@ def _line(row: RfqLine) -> RecordedMatch:
         # Decimal out of Postgres, float on the model: the wire and the screen
         # both speak JSON, and a Decimal has nowhere to land in either.
         offer_unit_price=float(row.offer_unit_price) if row.offer_unit_price is not None else None,
+        offer_received_at=row.offer_received_at,
         candidates=[
             RecordedCandidate(
                 item_code=one.item_code,

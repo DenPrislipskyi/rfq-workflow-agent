@@ -1,6 +1,6 @@
 """What the pipeline needs from a record store, and nothing more.
 
-Five methods. Two write, three read, and both implementations answer them the
+Six methods. Three write, three read, and both implementations answer them the
 same way - one against a folder on disk, one against Postgres and a blob
 container. The pipeline cannot tell which it has, which is the point: the
 tests run against the folder with no network, and the service runs against the
@@ -21,6 +21,7 @@ from src.infrastructure.storage.records import (
     EmailRecord,
     RecordedDelivery,
     RecordedExtraction,
+    RecordedInquiry,
     RecordedMatch,
 )
 
@@ -91,6 +92,20 @@ class Records(Protocol):
 
         `None` clears it, for the same reason `confirm` takes one - an offer
         withdrawn and an offer never made are the same state.
+        """
+        ...
+
+    async def inquire(self, record_id: str, inquiries: Sequence[RecordedInquiry]) -> bool:
+        """Record the letters that went to the suppliers. True when it took.
+
+        False for a record that does not exist, and false for one that has
+        already been asked: the letters go out once. A second send is refused
+        here rather than merged, because "what we sent" stops being an answer
+        the moment it can be rewritten after the fact.
+
+        The whole batch at once, not one supplier at a time. One click sends
+        every letter, and half of them on the record would describe a send
+        that never happened.
         """
         ...
 
