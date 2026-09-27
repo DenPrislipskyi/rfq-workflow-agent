@@ -692,3 +692,31 @@ async def test_an_approved_price_does_not_follow_the_supplier_afterwards(store):
 
     line = await _line(store, record_id, 1)
     assert (line.offer_unit_price, line.approved_unit_price) == (99.0, 28.0)
+
+
+async def test_a_candidate_keeps_the_reason_for_its_score_and_may_have_none(store):
+    """`None` is "not scored" - the model did not answer - and must not come
+    back as a zero, which the screen would read as "certainly not"."""
+    record_id = await store.open(
+        email=email(), outcome=None, decision_id="b7d5d04d-4", source="outlook"
+    )
+    await store.update(
+        record_id,
+        matching=[
+            RecordedMatch(
+                index=1,
+                verbatim="Steel toe sneakers",
+                how="search",
+                candidates=[
+                    RecordedCandidate(item_code="T19036300", confidence=63, why="size not stated"),
+                    RecordedCandidate(item_code="T19036500", confidence=None),
+                ],
+            )
+        ],
+    )
+
+    found = await store.read(record_id)
+    assert found is not None
+    first, second = found.matching[0].candidates
+    assert (first.confidence, first.why) == (63, "size not stated")
+    assert (second.confidence, second.why) == (None, "")

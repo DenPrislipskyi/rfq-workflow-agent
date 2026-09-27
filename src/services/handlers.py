@@ -685,6 +685,7 @@ def _recorded_match(line: MatchedLine) -> RecordedMatch:
                 item_code=scored.item.code,
                 description=scored.item.description,
                 confidence=scored.confidence,
+                why=scored.why,
                 item=dict(scored.item.fields),
             )
             for scored in line.candidates

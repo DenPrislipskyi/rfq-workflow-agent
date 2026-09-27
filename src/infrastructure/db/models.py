@@ -440,9 +440,12 @@ class RfqLineCandidate(Base):
 
     item_code: Mapped[str] = mapped_column(String(64))
     description: Mapped[str] = mapped_column(Text, default="")
-    # 0-100, this candidate's search score as a percentage of the best on the
-    # same line. Not a probability, and not comparable between lines.
-    confidence: Mapped[int] = mapped_column(Integer, default=0)
+    # 0-100, how sure matching is that this is what the line asked for. Null
+    # where it could not score the line: a dash on the screen, not a zero that
+    # would read as "certainly not".
+    confidence: Mapped[int | None] = mapped_column(Integer)
+    # What the score rests on, in one sentence.
+    why: Mapped[str] = mapped_column(Text, default="")
     # The whole row again: the table shows a candidate in the same columns it
     # shows a confirmed product, and it may not have fewer of them just because
     # nothing has been confirmed yet.

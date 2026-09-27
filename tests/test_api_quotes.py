@@ -545,6 +545,31 @@ async def test_a_settled_candidate_keeps_the_score_it_was_shortlisted_with(tmp_p
     assert (line["itemCode"], line["confidence"]) == ("T69133100", 78)
 
 
+async def test_every_candidate_says_why_it_scored_what_it_did(tmp_path: Path):
+    records, record_id = await one_rfq(tmp_path)
+    await records.update(
+        record_id,
+        matching=[
+            RecordedMatch(
+                index=7,
+                verbatim="Steel toe sneakers",
+                how="search",
+                candidates=[
+                    RecordedCandidate(item_code="T69128400", confidence=63, why="size not stated"),
+                    RecordedCandidate(item_code="T69133100", confidence=None),
+                ],
+            )
+        ],
+    )
+
+    candidates = client(records).get(f"{URL}/{record_id}/rfq").json()["lines"][0]["candidates"]
+
+    assert [(one["confidence"], one["why"]) for one in candidates] == [
+        (63, "size not stated"),
+        (None, ""),
+    ]
+
+
 async def test_every_candidate_carries_the_sheet_s_row_as_it_stands_today(tmp_path: Path):
     """A candidate is a product somebody is about to choose between, so it is
     shown as the sheet has it now - which is where the supplier lives."""

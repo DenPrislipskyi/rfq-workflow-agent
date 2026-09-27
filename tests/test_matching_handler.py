@@ -18,9 +18,21 @@ from src.domain.rules.catalog import Catalog
 from src.infrastructure.llm.client import LLMResult
 from src.infrastructure.llm.exceptions import LLMCallError
 from src.infrastructure.storage.records import EmailRecords
-from src.services.matching import AgreementJudge, MatchingPipeline
-from src.services.matching.schemas import Judgement, Judgements
-from tests.fakes import BrokenLLM
+from src.services.matching import (
+    AgreementJudge,
+    AssessedConfidence,
+    CandidateAssessor,
+    MatchingPipeline,
+)
+from src.services.matching.schemas import (
+    CandidateCheck,
+    Judgement,
+    Judgements,
+    LineCheck,
+    LineChecks,
+    PropertyCheck,
+)
+from tests.fakes import BrokenLLM, FakeLLM
 from tests.test_extraction_handler import Router, attachment, build_handler, message
 
 # The rope is the first line of the requisition every test reads back, and this
@@ -75,7 +87,13 @@ class MatchingRouter(Router):
         return await super().invoke(messages, schema)
 
 
-def build(tmp_path: Path, llm=None, matching_llm=None, shelf_wording: str | None = None):
+def build(
+    tmp_path: Path,
+    llm=None,
+    matching_llm=None,
+    shelf_wording: str | None = None,
+    scorer=None,
+):
     """The handler of `test_extraction_handler`, with a catalogue behind it."""
     llm = llm or MatchingRouter()
     records = EmailRecords(tmp_path / "Database", enabled=True)
@@ -85,6 +103,7 @@ def build(tmp_path: Path, llm=None, matching_llm=None, shelf_wording: str | None
         records=records,
         matching=MatchingPipeline(
             AgreementJudge(matching_llm or llm),
+            scorer=scorer,
             candidates=5,
         ),
         catalog=lambda: catalog(shelf_wording),
@@ -232,3 +251,37 @@ async def test_an_email_that_is_not_an_rfq_is_never_matched(tmp_path: Path):
     await handler.handle(message())
 
     assert recorded(tmp_path)["matching"] == []
+
+
+async def test_a_candidate_is_recorded_with_its_assessed_score_and_the_reason(tmp_path: Path):
+    """What the operator reads beside the number: why it is what it is."""
+    observed = LineChecks(
+        items=[
+            LineCheck(
+                index=0,
+                candidates=[
+                    CandidateCheck(
+                        candidate=1,
+                        same_product=True,
+                        properties=[
+                            PropertyCheck(
+                                name="size", line_value="24MM", item_value="24MM", agrees=True
+                            )
+                        ],
+                        why="same rope, same diameter",
+                    )
+                ],
+            )
+        ]
+    )
+    handler, _, _ = build(
+        tmp_path,
+        llm=MatchingRouter(same=False),
+        scorer=AssessedConfidence(CandidateAssessor(FakeLLM(observed))),
+    )
+
+    await handler.handle(message(attachment()))
+
+    candidate = recorded(tmp_path)["matching"][0]["candidates"][0]
+    assert (candidate["confidence"], candidate["why"]) == (100, "same rope, same diameter")
+

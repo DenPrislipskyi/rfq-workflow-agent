@@ -231,9 +231,12 @@ class MatchCandidate(Wire):
 
     item_code: str
     description: str = ""
-    # 0-100, this candidate's search score as a percentage of the best one on
-    # the same line. Shown to a person; nothing in the service decides on it.
-    confidence: int = 0
+    # 0-100, how sure matching is that this is what the line asked for. Null
+    # where the line could not be scored. Shown to a person; nothing in the
+    # service decides on it.
+    confidence: int | None = None
+    # What the score rests on, in one sentence.
+    why: str = ""
     # Every column of the sheet's row, so that a candidate fills the same
     # columns of the table as a confirmed product does.
     item: dict[str, Any] = Field(default_factory=dict)
@@ -845,6 +848,7 @@ def _unsettled(number: int, match: RecordedMatch, catalog: Catalog) -> MatchRow:
                 item_code=one.item_code,
                 description=one.description,
                 confidence=one.confidence,
+                why=one.why,
                 item=_fields(catalog, one.item_code, one.item),
             )
             for one in match.candidates

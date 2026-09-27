@@ -527,6 +527,7 @@ async def _replace_lines(
                     item_code=one.item_code,
                     description=one.description,
                     confidence=one.confidence,
+                    why=one.why,
                     item=dict(one.item),
                 )
                 for rank, one in enumerate(line.candidates, start=1)
@@ -633,6 +634,7 @@ def _line(row: RfqLine) -> RecordedMatch:
                 item_code=one.item_code,
                 description=one.description,
                 confidence=one.confidence,
+                why=one.why,
                 item=dict(one.item),
             )
             for one in row.candidates

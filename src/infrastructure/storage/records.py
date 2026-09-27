@@ -115,9 +115,14 @@ class RecordedCandidate(BaseModel):
 
     item_code: str
     description: str = ""
-    # 0-100, this candidate's search score as a percentage of the best one on
-    # the same line. Not a probability, and not comparable between lines.
-    confidence: int = 0
+    # 0-100, how sure matching is that this is what the line asked for. `None`
+    # where it could not score the line - shown as a dash, not as a number
+    # nobody worked out. Records written before scoring could fail carry a
+    # number here and read as before.
+    confidence: int | None = 0
+    # What the score rests on, in one sentence: "size not stated - one of four".
+    # Empty for a score that has no reason to give.
+    why: str = ""
     # The whole row of the sheet, as for a match: the table shows a candidate
     # in the same columns it shows a confirmed product, and it may not have
     # fewer of them just because nothing has been confirmed yet.
