@@ -444,8 +444,10 @@ class RfqLineCandidate(Base):
     # where it could not score the line: a dash on the screen, not a zero that
     # would read as "certainly not".
     confidence: Mapped[int | None] = mapped_column(Integer)
-    # What the score rests on, in one sentence.
-    why: Mapped[str] = mapped_column(Text, default="")
+    # What the score rests on, in one sentence. The server default is for the
+    # image that predates this column: it writes candidates without a reason,
+    # and during a deploy it runs against the new schema for a few minutes.
+    why: Mapped[str] = mapped_column(Text, default="", server_default="")
     # The whole row again: the table shows a candidate in the same columns it
     # shows a confirmed product, and it may not have fewer of them just because
     # nothing has been confirmed yet.

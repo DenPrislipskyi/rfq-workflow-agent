@@ -12,6 +12,13 @@ takes null.
 Existing rows keep the number they have and an empty reason: they were scored
 the old way, and a reason written for them now would be invented.
 
+`why` keeps its server default of `''` for good, and that is deliberate. The
+migration runs before the new image starts, so for a few minutes the old image
+writes candidates without a reason - and without the default every one of
+those writes would fail on the new NOT NULL column. With it, the old image
+keeps working on the new schema, and rolling the image back needs no
+downgrade.
+
 Revision ID: c4e81f0a7d62
 Revises: b93e17a4c250
 Create Date: 2026-09-27 20:00:00.000000
@@ -32,14 +39,10 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    # The server default only fills the rows already there; the model supplies
-    # the value from here on, so the default goes again at once - as it has
-    # none in `models.py`.
     op.add_column(
         "rfq_line_candidates",
         sa.Column("why", sa.Text(), nullable=False, server_default=sa.text("''")),
     )
-    op.alter_column("rfq_line_candidates", "why", server_default=None)
     op.alter_column(
         "rfq_line_candidates", "confidence", existing_type=sa.Integer(), nullable=True
     )

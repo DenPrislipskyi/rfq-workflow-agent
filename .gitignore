@@ -337,3 +337,6 @@ tests/fixtures/
 # Eval reports hold model reasoning quoted from real customer emails.
 evals/dataset.jsonl
 evals/reports/
+
+# Local deploy runbook - it names production resources and how to reach them.
+DEPLOY.md
