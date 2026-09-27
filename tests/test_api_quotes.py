@@ -8,15 +8,25 @@ and who wrote in, and a field nobody put there on purpose is a bug.
 
 import asyncio
 from contextlib import suppress
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
+from pypdf import PdfReader
 
 from src import register_exceptions, register_routers
 from src.api import quotes
-from src.api.dependencies import get_catalog, get_changes, get_records
+from src.api.dependencies import (
+    get_catalog,
+    get_changes,
+    get_customer_file_template,
+    get_quotation_logo,
+    get_quote_template,
+    get_records,
+)
 from src.domain.enums import (
     DecisionPath,
     DeliveryOutcome,
@@ -46,6 +56,8 @@ from src.infrastructure.storage.records import (
 )
 
 URL = "/api/v1/quotes"
+CUSTOMER_TEMPLATE = Path(__file__).parents[1] / "config" / "quotation_customer_file_template.xlsx"
+QUOTE_TEMPLATE = Path(__file__).parents[1] / "config" / "quotation_sg_uae_workbook_template.xlsm"
 BODY = "Dear Sir/Madam, you may find attached our RFQ for Engine Materials."
 
 
@@ -95,6 +107,9 @@ def client(records: EmailRecords, changes: Changes | None = None) -> TestClient:
     app.dependency_overrides[get_records] = lambda: records
     app.dependency_overrides[get_changes] = lambda: signal
     app.dependency_overrides[get_catalog] = catalog
+    app.dependency_overrides[get_quotation_logo] = lambda: None
+    app.dependency_overrides[get_customer_file_template] = lambda: CUSTOMER_TEMPLATE
+    app.dependency_overrides[get_quote_template] = lambda: QUOTE_TEMPLATE
     return TestClient(app)
 
 
@@ -778,3 +793,242 @@ async def test_asking_the_suppliers_leaves_the_lines_alone(tmp_path: Path):
     page.put(_inquiries(record_id), json=ASKED)
 
     assert page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]["confirmedItemCode"] == "T69133100"
+
+
+def _approval(record_id: str) -> str:
+    return f"{URL}/{record_id}/rfq/approval"
+
+
+SIGNED = {"marginStock": 12, "marginJit": 15, "lines": [{"index": 7, "unitPrice": 28.0}]}
+
+
+async def test_an_rfq_starts_unapproved(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    page = client(records).get(f"{URL}/{record_id}/rfq").json()
+    assert page["approval"] is None
+    assert page["lines"][0]["approvedUnitPrice"] is None
+
+
+async def test_approving_freezes_the_prices_and_the_margins(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    assert page.put(_approval(record_id), json=SIGNED).status_code == 204
+
+    rfq = page.get(f"{URL}/{record_id}/rfq").json()
+    assert rfq["approval"]["marginStock"] == 12
+    assert rfq["approval"]["marginJit"] == 15
+    assert rfq["approval"]["approvedAt"] is not None, "the server dates it, not the browser"
+    assert rfq["lines"][0]["approvedUnitPrice"] == 28.0
+
+
+async def test_an_approval_with_a_hole_in_it_is_refused(tmp_path: Path):
+    """A quotation missing a line is not a smaller quotation - it is a wrong
+    one, and the hole is invisible in the total."""
+    records, record_id = await one_rfq(tmp_path)
+    await records.update(
+        record_id,
+        matching=[RecordedMatch(index=7, verbatim="bolts"), RecordedMatch(index=8, verbatim="rope")],
+    )
+    page = client(records)
+
+    assert page.put(_approval(record_id), json=SIGNED).status_code == 422
+    assert page.get(f"{URL}/{record_id}/rfq").json()["approval"] is None
+
+
+async def test_the_pricing_is_approved_once(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+    page.put(_approval(record_id), json=SIGNED)
+
+    again = {"marginStock": 99, "marginJit": 99, "lines": [{"index": 7, "unitPrice": 99.0}]}
+    assert page.put(_approval(record_id), json=again).status_code == 409
+
+    rfq = page.get(f"{URL}/{record_id}/rfq").json()
+    assert rfq["approval"]["marginStock"] == 12
+    assert rfq["lines"][0]["approvedUnitPrice"] == 28.0
+
+
+async def test_an_rfq_that_is_not_there_cannot_be_approved(tmp_path: Path):
+    records, _ = await _rfq_with_a_shortlist(tmp_path)
+
+    assert client(records).put(_approval("no-such-rfq"), json=SIGNED).status_code == 404
+
+
+async def test_a_price_or_a_margin_no_desk_could_have_meant_is_refused(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    assert page.put(_approval(record_id), json={**SIGNED, "marginStock": -1}).status_code == 422
+    assert page.put(_approval(record_id), json={**SIGNED, "marginJit": 99999}).status_code == 422
+    assert page.put(_approval(record_id), json={**SIGNED, "lines": []}).status_code == 422
+    assert page.get(f"{URL}/{record_id}/rfq").json()["approval"] is None
+
+
+async def test_an_approved_price_does_not_follow_the_supplier_afterwards(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+    page.put(_approval(record_id), json=SIGNED)
+
+    page.put(_offer(record_id, 7), json={"unitPrice": 99.0})
+
+    line = page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]
+    assert (line["offerUnitPrice"], line["approvedUnitPrice"]) == (99.0, 28.0)
+
+
+def _quotation(record_id: str) -> str:
+    return f"{URL}/{record_id}/rfq/quotation.pdf"
+
+
+def _pdf_text(content: bytes) -> str:
+    return "\n".join(page.extract_text() for page in PdfReader(BytesIO(content)).pages)
+
+
+async def _approved(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+    page.put(_confirmation(record_id, 7), json={"itemCode": "T69133100"})
+    page.put(
+        _approval(record_id),
+        json={"marginStock": 12, "marginJit": 15, "lines": [{"index": 7, "unitPrice": 28.0}]},
+    )
+    return page, record_id
+
+
+async def test_the_quotation_downloads_as_a_pdf(tmp_path: Path):
+    page, record_id = await _approved(tmp_path)
+
+    response = page.get(_quotation(record_id))
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["content-disposition"].startswith("attachment; filename=")
+    assert response.headers["content-disposition"].endswith('_quotation.pdf"')
+    assert response.content.startswith(b"%PDF")
+
+
+async def test_the_quotation_quotes_the_approved_price(tmp_path: Path):
+    """The document is the number we named, not one worked out again today."""
+    page, record_id = await _approved(tmp_path)
+    page.put(_offer(record_id, 7), json={"unitPrice": 99.0})
+
+    text = _pdf_text(page.get(_quotation(record_id)).content)
+
+    assert "T69133100" in text, "our code, as settled"
+    assert "28.00" in text
+    assert "99.00" not in text
+
+
+async def test_there_is_no_quotation_before_the_pricing_is_approved(tmp_path: Path):
+    """The screen keeps the fourth stage shut until approval. A rule that
+    lives only in a button is not one."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    assert client(records).get(_quotation(record_id)).status_code == 409
+
+
+async def test_there_is_no_quotation_for_an_rfq_that_is_not_there(tmp_path: Path):
+    records, _ = await _rfq_with_a_shortlist(tmp_path)
+
+    assert client(records).get(_quotation("no-such-rfq")).status_code == 404
+
+
+async def test_the_uae_letterhead_goes_out_from_the_dubai_office(tmp_path: Path):
+    page, record_id = await _approved(tmp_path)
+
+    response = page.get(_quotation(record_id), params={"format": "uae"})
+
+    assert response.status_code == 200
+    text = _pdf_text(response.content)
+    assert "Seven Seas Shipchandlers (L.L.C)" in text
+    assert "VAT%" in text
+    assert "28.00" in text
+
+
+async def test_a_letterhead_nobody_has_is_refused(tmp_path: Path):
+    page, record_id = await _approved(tmp_path)
+
+    assert page.get(_quotation(record_id), params={"format": "fr"}).status_code == 422
+
+
+def _customer_file(record_id: str) -> str:
+    return f"{URL}/{record_id}/rfq/customer-file.xlsx"
+
+
+async def test_the_customer_file_downloads_as_a_spreadsheet(tmp_path: Path):
+    page, record_id = await _approved(tmp_path)
+
+    response = page.get(_customer_file(record_id))
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert response.headers["content-disposition"].endswith('_customer_file.xlsx"')
+
+
+async def test_the_customer_file_carries_the_approved_price(tmp_path: Path):
+    """The number we named, not one worked out again after a supplier moved."""
+    page, record_id = await _approved(tmp_path)
+    page.put(_offer(record_id, 7), json={"unitPrice": 99.0})
+
+    sheet = load_workbook(BytesIO(page.get(_customer_file(record_id)).content)).active
+    row = next(sheet.iter_rows(min_row=2, values_only=True))
+
+    assert row[0] is None, "no category - we have none to give"
+    assert row[1] == 1
+    assert row[6] == 28.0
+
+
+async def test_there_is_no_customer_file_before_the_pricing_is_approved(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    assert client(records).get(_customer_file(record_id)).status_code == 409
+
+
+async def test_there_is_no_customer_file_for_an_rfq_that_is_not_there(tmp_path: Path):
+    records, _ = await _rfq_with_a_shortlist(tmp_path)
+
+    assert client(records).get(_customer_file("no-such-rfq")).status_code == 404
+
+
+def _quote_workbook(record_id: str) -> str:
+    return f"{URL}/{record_id}/rfq/quotation.xlsm"
+
+
+async def test_the_quote_workbook_downloads_for_either_office(tmp_path: Path):
+    page, record_id = await _approved(tmp_path)
+
+    for office in ("sg", "uae"):
+        response = page.get(_quote_workbook(record_id), params={"format": office})
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/vnd.ms-excel.sheet.macroEnabled.12"
+        assert response.headers["content-disposition"].endswith(f'_quotation_{office}.xlsm"')
+
+
+async def test_the_quote_workbook_carries_the_approved_price_and_the_office(tmp_path: Path):
+    page, record_id = await _approved(tmp_path)
+    page.put(_offer(record_id, 7), json={"unitPrice": 99.0})
+
+    content = page.get(_quote_workbook(record_id), params={"format": "uae"}).content
+    workbook = load_workbook(BytesIO(content), keep_vba=True)
+    lines = workbook[workbook.sheetnames[1]]
+
+    assert workbook["SUMMARY"]["C15"].value == "100569476300003"
+    assert lines["C11"].value == "T69133100"
+    assert lines["K11"].value == 28
+
+
+async def test_there_is_no_quote_workbook_before_the_pricing_is_approved(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    assert client(records).get(_quote_workbook(record_id)).status_code == 409
+
+
+async def test_there_is_no_quote_workbook_for_an_office_we_do_not_have(tmp_path: Path):
+    page, record_id = await _approved(tmp_path)
+
+    assert page.get(_quote_workbook(record_id), params={"format": "fr"}).status_code == 422
+

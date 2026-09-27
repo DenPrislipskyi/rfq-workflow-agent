@@ -92,6 +92,16 @@ class Settings(BaseSettings):
     # same shape the desk produces by hand. Made from a finished RFQ with
     # `src.tools.make_output_template`, and shipped in the image.
     RFQ_TEMPLATE_PATH: Path = Path("config/rfq_output_template.xlsx")
+    # The mark on the quotation PDF, lifted from the desk's own quotations at
+    # the size they print it. Shipped in the image alongside the form above; a
+    # missing file renders the quotation without a logo rather than failing it.
+    QUOTATION_LOGO_PATH: Path = Path("config/quotation_pdf_logo.jpg")
+    # The customer's own spreadsheet layout the quotation can also go out in.
+    # Made by `src.tools.make_customer_template` and shipped in the image.
+    CUSTOMER_FILE_TEMPLATE_PATH: Path = Path("config/quotation_customer_file_template.xlsx")
+    # The desk's own quotation workbook, with its Print macro. Made from a
+    # SCINT export by `src.tools.make_quote_template` and shipped in the image.
+    QUOTE_TEMPLATE_PATH: Path = Path("config/quotation_sg_uae_workbook_template.xlsm")
     # Where the filled copies are kept, one per RFQ, named after the decision
     # that produced it. Until the forward carries the file this folder is the
     # only way to see what came out.

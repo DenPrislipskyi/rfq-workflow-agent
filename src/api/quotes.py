@@ -17,19 +17,36 @@ read - is in the record, one line away from being shown.
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Mapping
-from datetime import UTC, datetime
-from typing import Annotated, Any
+import re
+from dataclasses import replace
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
-from src.api.dependencies import CatalogDep, ChangesDep, RecordsDep
+from src.api.dependencies import (
+    CatalogDep,
+    ChangesDep,
+    CustomerFileTemplateDep,
+    QuotationLogoDep,
+    QuoteTemplateDep,
+    RecordsDep,
+)
 from src.domain.enums import DeliveryOutcome, EmailCategory, Priority
 from src.domain.rules.catalog import Catalog, CatalogItem, normalize_code
 from src.infrastructure.storage.changes import Changes
-from src.infrastructure.storage.records import EmailRecord, RecordedInquiry, RecordedMatch
+from src.infrastructure.storage.records import (
+    EmailRecord,
+    RecordedApproval,
+    RecordedInquiry,
+    RecordedMatch,
+)
+from src.services import customer_file, quote_workbook
+from src.services.quotation import DUBAI, SINGAPORE, Issuer, Quotation, QuotedLine, render
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +66,11 @@ MOST_A_UNIT_COSTS = 10_000_000.0
 MOST_A_SUPPLIER_IS_CALLED = 256
 MOST_A_LETTER_RUNS = 20_000
 MOST_SUPPLIERS_ASKED = 200
+
+# The most a margin may be, in percent. A guard against a stray keystroke
+# rather than a rule: what a desk charges is its own business, and 1000 % is
+# already past anything anybody means to type.
+MOST_A_MARGIN_IS = 1000.0
 
 # How long the stream stays silent before it says something anyway. Proxies and
 # load balancers close a connection that has sent nothing for a minute or two,
@@ -259,6 +281,9 @@ class MatchRow(Wire):
     # When that price arrived. Null wherever the price is: the screen dates a
     # supplier's reply by this, and a reply nobody has had has no date.
     offer_received_at: datetime | None = None
+    # What this line sells for, per unit, frozen at approval. Null until
+    # somebody approves the pricing.
+    approved_unit_price: float | None = None
 
 
 class Confirmation(Wire):
@@ -309,6 +334,34 @@ class SentInquiry(Inquiry):
     sent_at: datetime
 
 
+class ApprovedLine(Wire):
+    """What one line sells for, as approved."""
+
+    index: int
+    unit_price: float = Field(gt=0, le=MOST_A_UNIT_COSTS)
+
+
+class Approval(Wire):
+    """A sign-off on the pricing of one RFQ.
+
+    Carries the prices rather than the inputs to them. The screen has already
+    done the arithmetic and shown it to a person, and recomputing it here would
+    approve a number nobody looked at.
+    """
+
+    margin_stock: float = Field(ge=0, le=MOST_A_MARGIN_IS)
+    margin_jit: float = Field(ge=0, le=MOST_A_MARGIN_IS)
+    lines: list[ApprovedLine] = Field(min_length=1)
+
+
+class ApprovedPricing(Wire):
+    """The sign-off as the record kept it. `approved_at` is the server's."""
+
+    approved_at: datetime
+    margin_stock: float
+    margin_jit: float
+
+
 class RfqDetail(Wire):
     """One RFQ as its own page reads it."""
 
@@ -327,6 +380,9 @@ class RfqDetail(Wire):
     # What was asked of the suppliers. Empty until somebody sends them, and it
     # is what stops the screen offering to send them a second time.
     inquiries: list[SentInquiry] = Field(default_factory=list)
+    # Set once somebody approves the pricing. Null is the whole of "nobody
+    # has", and it is what keeps the fourth stage shut.
+    approval: ApprovedPricing | None = None
 
 
 @router.get("/{record_id}/rfq", status_code=status.HTTP_200_OK)
@@ -340,7 +396,138 @@ async def read_rfq(record_id: str, records: RecordsDep, catalog: CatalogDep) -> 
     record = await records.read(record_id)
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such RFQ")
+    return _detail(record, catalog.current)
 
+
+# The office each letterhead speaks for, on the PDF and in the workbook.
+LETTERHEADS: dict[str, Issuer] = {"sg": SINGAPORE, "uae": DUBAI}
+OFFICES: dict[str, quote_workbook.Office] = {
+    "sg": quote_workbook.SINGAPORE_OFFICE,
+    "uae": quote_workbook.DUBAI_OFFICE,
+}
+
+
+@router.get("/{record_id}/rfq/quotation.pdf", status_code=status.HTTP_200_OK)
+async def download_quotation(
+    record_id: str,
+    records: RecordsDep,
+    catalog: CatalogDep,
+    logo: QuotationLogoDep,
+    format: Literal["sg", "uae"] = "sg",
+) -> Response:
+    """The quotation the customer receives, as a PDF on the desk's own form.
+
+    **Approved, or not at all.** A 409 until the pricing is signed off: the
+    document is the number we name to the customer, and before approval there
+    is no such number yet - only one the screen would compute today. The
+    fourth stage is shut until then for the same reason, and a rule that lives
+    only in a button is not one.
+
+    Read from the same view as the page, so the PDF cannot disagree with the
+    table the person looked at before downloading it. `format` names the
+    letterhead: `sg` for the Singapore office, `uae` for the Dubai one, whose
+    form adds discount and VAT columns.
+    """
+    record, detail = await _approved(record_id, records, catalog)
+    quotation = Quotation(
+        issuer=LETTERHEADS[format],
+        number=detail.reference,
+        customer=detail.customer_name,
+        customer_email=detail.customer_name,
+        port=detail.port,
+        vessel=detail.vessel_name,
+        imo=detail.imo,
+        received_on=date.fromisoformat(detail.received_on) if detail.received_on else None,
+        approved_at=record.approval.approved_at,
+        lines=[_quoted(row) for row in detail.lines],
+    )
+    # ReportLab is synchronous and a long RFQ takes it a noticeable moment;
+    # the event loop has the stream and every other page to serve meanwhile.
+    pdf = await asyncio.to_thread(render, quotation, logo)
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{_filename(detail)}"'},
+    )
+
+
+@router.get("/{record_id}/rfq/customer-file.xlsx", status_code=status.HTTP_200_OK)
+async def download_customer_file(
+    record_id: str,
+    records: RecordsDep,
+    catalog: CatalogDep,
+    template: CustomerFileTemplateDep,
+) -> Response:
+    """The quotation in the customer's own spreadsheet layout.
+
+    The same rule as the PDF, for the same reason: a 409 until the pricing is
+    approved. What differs is whose words fill it - the customer's code and
+    description as our sheet records them, the columns the fourth stage shows
+    under the same names, so the customer finds their own lines in it.
+    """
+    _, detail = await _approved(record_id, records, catalog)
+    lines = [_quoted_for_customer(row) for row in detail.lines]
+    workbook = await asyncio.to_thread(customer_file.fill, template.read_bytes(), lines)
+    name = _filename(detail, "customer_file.xlsx")
+    return Response(
+        content=workbook,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+@router.get("/{record_id}/rfq/quotation.xlsm", status_code=status.HTTP_200_OK)
+async def download_quote_workbook(
+    record_id: str,
+    records: RecordsDep,
+    catalog: CatalogDep,
+    template: QuoteTemplateDep,
+    format: Literal["sg", "uae"] = "sg",
+) -> Response:
+    """The quotation as the desk's own Excel workbook, on either office's details.
+
+    The same approved numbers as the PDF, and the same 409 before approval. A
+    macro-enabled file because the desk's workbook is one: its `Print` button
+    is a macro, and saving it as `.xlsx` would leave a button that does nothing.
+    """
+    record, detail = await _approved(record_id, records, catalog)
+    book = quote_workbook.QuoteBook(
+        office=OFFICES[format],
+        number=detail.reference,
+        vessel=detail.vessel_name,
+        port=detail.port,
+        client=detail.customer_name,
+        quoted_on=record.approval.approved_at.date(),
+        lines=[_book_line(row) for row in detail.lines],
+    )
+    workbook = await asyncio.to_thread(quote_workbook.fill, template.read_bytes(), book)
+    name = _filename(detail, f"quotation_{format}.xlsm")
+    return Response(
+        content=workbook,
+        media_type="application/vnd.ms-excel.sheet.macroEnabled.12",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+async def _approved(
+    record_id: str, records: RecordsDep, catalog: CatalogDep
+) -> tuple[EmailRecord, RfqDetail]:
+    """The record and its page view, or the reason there is no quotation yet.
+
+    404 when there is no such RFQ, 409 while its pricing is unapproved: before
+    approval there is no number to name to the customer, only the one the
+    screen would compute today.
+    """
+    record = await records.read(record_id)
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such RFQ")
+    if record.approval is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This pricing has not been approved yet")
+    return record, _detail(record, catalog.current)
+
+
+def _detail(record: EmailRecord, catalog: Catalog) -> RfqDetail:
+    """One record as the RFQ page reads it - and as the quotation does."""
     return RfqDetail(
         id=record.id,
         reference=record.rfq_reference or "",
@@ -351,9 +538,16 @@ async def read_rfq(record_id: str, records: RecordsDep, catalog: CatalogDep) -> 
         received_on=_received(record),
         subject=record.subject or "",
         lines=[
-            _line(number, match, catalog.current)
+            _line(number, match, catalog)
             for number, match in enumerate(record.matching, start=1)
         ],
+        approval=ApprovedPricing(
+            approved_at=record.approval.approved_at,
+            margin_stock=record.approval.margin_stock,
+            margin_jit=record.approval.margin_jit,
+        )
+        if record.approval
+        else None,
         inquiries=[
             SentInquiry(
                 supplier=one.supplier,
@@ -436,6 +630,45 @@ async def send_inquiries(record_id: str, body: Inquiries, records: RecordsDep) -
         # sent" are both "this send is not going to happen", and the caller
         # does the same thing about either - it rereads the record.
         raise HTTPException(status.HTTP_409_CONFLICT, "These inquiries have already gone")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/{record_id}/rfq/approval", status_code=status.HTTP_204_NO_CONTENT)
+async def approve_pricing(record_id: str, body: Approval, records: RecordsDep) -> Response:
+    """Freeze what this RFQ sells for.
+
+    **Every line, or none.** An approval that covered some of them would be a
+    quotation with holes in it, and the hole would not be visible in the total
+    - it would just be a smaller number. The screen greys its button out for
+    the same reason, and a rule that lives only in a button is not one.
+
+    **Once.** A record already approved is a 409. There is no way back on
+    purpose: a quotation that can be un-approved is a quotation nobody
+    downstream can rely on, and by then the number may already be in somebody
+    else's inbox.
+
+    The prices arrive computed. The screen has already shown them to a person,
+    and recomputing them here would approve a number nobody looked at.
+    """
+    record = await records.read(record_id)
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such RFQ")
+
+    prices = {line.index: line.unit_price for line in body.lines}
+    missing = [match.index for match in record.matching if match.index not in prices]
+    if missing:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"No price for line(s) {', '.join(str(one) for one in missing)}",
+        )
+
+    approval = RecordedApproval(
+        approved_at=_now(),
+        margin_stock=body.margin_stock,
+        margin_jit=body.margin_jit,
+    )
+    if not await records.approve(record_id, approval=approval, prices=prices):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This pricing has already been approved")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -606,6 +839,7 @@ def _unsettled(number: int, match: RecordedMatch, catalog: Catalog) -> MatchRow:
         confirmed_item_code=match.confirmed_item_code or "",
         offer_unit_price=match.offer_unit_price,
         offer_received_at=match.offer_received_at,
+        approved_unit_price=match.approved_unit_price,
         candidates=[
             MatchCandidate(
                 item_code=one.item_code,
@@ -616,6 +850,75 @@ def _unsettled(number: int, match: RecordedMatch, catalog: Catalog) -> MatchRow:
             for one in match.candidates
         ],
     )
+
+
+def _quoted(row: MatchRow) -> QuotedLine:
+    """One line of the page, as the quotation prints it.
+
+    Our code and our description, not the customer's: the document names what
+    is being sold. The customer's unit where they gave one and the sheet's
+    otherwise, the same fallback every stage of the page uses.
+    """
+    price = row.approved_unit_price
+    return QuotedLine(
+        number=row.line,
+        code=row.item_code,
+        description=row.item_description,
+        quantity=row.quantity,
+        uom=row.uom or _sheet_column(row.item, "UOM"),
+        # Through `str`, so the price is the two-decimal number that was
+        # approved rather than the binary float nearest to it.
+        unit_price=Decimal(str(price)) if price is not None else None,
+    )
+
+
+def _quoted_for_customer(row: MatchRow) -> QuotedLine:
+    """The same line, in the customer's words as our sheet records them.
+
+    `Customer Code` and `Customer Description` of the row the line was settled
+    on - not what the customer typed into their email. The fourth stage shows
+    the same two columns under these names, and the file must not disagree
+    with the table the person approved it from.
+    """
+    return replace(
+        _quoted(row),
+        code=_sheet_column(row.item, "Customer Code"),
+        description=_sheet_column(row.item, "Customer Description"),
+    )
+
+
+def _book_line(row: MatchRow) -> quote_workbook.BookLine:
+    """A line for the desk's workbook: our code and words, and the customer's
+    beside them as our sheet records them - the same pair the fourth stage
+    shows."""
+    ours = _quoted(row)
+    return quote_workbook.BookLine(
+        number=ours.number,
+        code=ours.code,
+        description=ours.description,
+        quantity=ours.quantity,
+        uom=ours.uom,
+        unit_price=ours.unit_price,
+        customer_code=_sheet_column(row.item, "Customer Code"),
+        customer_description=_sheet_column(row.item, "Customer Description"),
+    )
+
+
+def _sheet_column(item: Mapping[str, Any], heading: str) -> str:
+    """One column of a sheet row, found the way the page finds it: case and
+    spacing in the heading do not matter, because the sheet is edited by hand."""
+    wanted = re.sub(r"\s+", "", heading).lower()
+    for key, value in item.items():
+        if re.sub(r"\s+", "", str(key)).lower() == wanted:
+            return str(value or "")
+    return ""
+
+
+def _filename(detail: RfqDetail, suffix: str = "quotation.pdf") -> str:
+    """`RFQ-0042_quotation.pdf`. Only characters no browser or mail client
+    will trip over go in a header - the number is ours, but it is still text."""
+    stem = re.sub(r"[^A-Za-z0-9._-]", "", detail.reference) or "quotation"
+    return f"{stem}_{suffix}"
 
 
 def _received(record: EmailRecord) -> str:

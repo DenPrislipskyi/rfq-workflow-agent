@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -40,7 +41,28 @@ def get_catalog(request: Request) -> CatalogService:
     return request.state.catalog
 
 
+def get_quotation_logo() -> Path | None:
+    """The mark on the quotation PDF. A dependency of its own, rather than read
+    off the settings where it is used, so the endpoint can be exercised without
+    a whole `.env` behind it."""
+    return get_settings().QUOTATION_LOGO_PATH
+
+
+def get_customer_file_template() -> Path:
+    """The customer's spreadsheet layout, for the same reason as the logo: the
+    endpoint must be testable without a whole `.env`."""
+    return get_settings().CUSTOMER_FILE_TEMPLATE_PATH
+
+
+def get_quote_template() -> Path:
+    """The desk's quotation workbook - a dependency for the same reason."""
+    return get_settings().QUOTE_TEMPLATE_PATH
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+QuotationLogoDep = Annotated[Path | None, Depends(get_quotation_logo)]
+CustomerFileTemplateDep = Annotated[Path, Depends(get_customer_file_template)]
+QuoteTemplateDep = Annotated[Path, Depends(get_quote_template)]
 TriageDep = Annotated[EmailTriage, Depends(get_triage)]
 LLMRegistryDep = Annotated[LLMRegistry, Depends(get_llm_registry)]
 NotificationServiceDep = Annotated[
