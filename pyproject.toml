@@ -27,6 +27,7 @@ dependencies = [
     "python-docx>=1.2.0",
     "python-pptx>=1.0.2",
     "pyyaml>=6.0.3",
+    "reportlab>=5.0.1",
     "selectolax>=0.4.11",
     "sqlalchemy[asyncio]>=2.0",
     "uvicorn[standard]>=0.52.4",
