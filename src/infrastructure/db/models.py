@@ -152,6 +152,9 @@ class Email(Base):
         cascade="all, delete-orphan",
         order_by="RfqInquiry.supplier",
     )
+    approval: Mapped["RfqApproval | None"] = relationship(
+        back_populates="email", cascade="all, delete-orphan", uselist=False
+    )
 
     __table_args__ = (
         UniqueConstraint("message_id", name="emails_message_id_key"),
@@ -333,6 +336,10 @@ class RfqLine(Base):
     # a supplier answers about lines, and a reply that covered two of three
     # would date the third one too.
     offer_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # What this line sells for, per unit, as it stood at approval. Kept rather
+    # than recomputed: cost and margin both move afterwards, and a quotation
+    # that followed them would stop being the number the customer was given.
+    approved_unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
 
     # `code_confirmed`, `code_rejected`, `search`, `none`. The first thing an
     # operator looks at: "their code was wrong" and "we found it by its words"
@@ -385,6 +392,33 @@ class RfqInquiry(Base):
         # grouping exists to prevent, arriving by a different door.
         UniqueConstraint("email_id", "supplier", name="rfq_inquiries_email_id_supplier_key"),
     )
+
+
+class RfqApproval(Base):
+    """That somebody signed off the pricing of this RFQ, and with what.
+
+    One row per email at most, like the verdict and the extraction. Its
+    presence is the whole of "this RFQ is approved" - there is no flag beside
+    it to disagree with, and no way back.
+
+    The margins sit here rather than on the lines because they are one decision
+    about the whole quotation: they answer "why is this line priced so" once,
+    instead of repeating the same two numbers down every row.
+    """
+
+    __tablename__ = "rfq_approvals"
+
+    email_id: Mapped[str] = mapped_column(
+        ForeignKey("emails.id", ondelete="CASCADE"), primary_key=True
+    )
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Percentages, as a person typed them. `Numeric` for the same reason the
+    # prices are: a margin that rounds differently on two machines prices the
+    # quotation differently on two machines.
+    margin_stock: Mapped[Decimal] = mapped_column(Numeric(7, 3))
+    margin_jit: Mapped[Decimal] = mapped_column(Numeric(7, 3))
+
+    email: Mapped[Email] = relationship(back_populates="approval")
 
 
 class RfqLineCandidate(Base):

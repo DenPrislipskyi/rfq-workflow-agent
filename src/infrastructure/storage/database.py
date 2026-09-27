@@ -1,6 +1,6 @@
 """The record store, in Postgres, with the bytes in blob storage.
 
-The other half of `records.py`. Same six methods, same `EmailRecord` going in
+The other half of `records.py`. Same seven methods, same `EmailRecord` going in
 and coming out - what changes is where it lands: rows instead of a JSON file,
 and a container instead of the folder beside it.
 
@@ -25,8 +25,9 @@ row pointing at a blob that is not there is a broken page.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from sqlalchemy import select, text as sql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -41,6 +42,7 @@ from src.infrastructure.db import (
     EmailFile,
     EmailVerdict,
     FileRole,
+    RfqApproval,
     RfqInquiry,
     RfqLine,
     RfqLineCandidate,
@@ -55,6 +57,7 @@ from src.infrastructure.storage.records import (
     NOT_KEPT,
     EmailRecord,
     RecordedAddress,
+    RecordedApproval,
     RecordedCandidate,
     RecordedDelivery,
     RecordedExtraction,
@@ -89,6 +92,7 @@ _WHOLE = (
     selectinload(Email.files),
     selectinload(Email.lines).selectinload(RfqLine.candidates),
     selectinload(Email.inquiries),
+    selectinload(Email.approval),
 )
 
 
@@ -268,6 +272,43 @@ class DatabaseRecords:
                 ]
         except Exception:
             logger.exception("Could not record the inquiries of %s", record_id)
+            return False
+
+        self._changes.announce()
+        return True
+
+    async def approve(
+        self,
+        record_id: str,
+        *,
+        approval: RecordedApproval,
+        prices: Mapping[int, float],
+    ) -> bool:
+        """Freeze what this RFQ sells for. True when it took.
+
+        False for a record that has none, and false for one already approved:
+        the sign-off happens once, and a second one would move a number the
+        customer may already have been quoted.
+        """
+        if not self._enabled:
+            return False
+
+        try:
+            async with self._sessions() as session, session.begin():
+                row = await session.get(Email, record_id, options=_WHOLE)
+                if row is None or row.approval is not None:
+                    return False
+
+                for line in row.lines:
+                    if line.index in prices:
+                        line.approved_unit_price = Decimal(str(prices[line.index]))
+                row.approval = RfqApproval(
+                    approved_at=approval.approved_at,
+                    margin_stock=Decimal(str(approval.margin_stock)),
+                    margin_jit=Decimal(str(approval.margin_jit)),
+                )
+        except Exception:
+            logger.exception("Could not approve the pricing of %s", record_id)
             return False
 
         self._changes.announce()
@@ -540,6 +581,13 @@ def _record(row: Email) -> EmailRecord:
             )
             for one in row.inquiries
         ],
+        approval=RecordedApproval(
+            approved_at=row.approval.approved_at,
+            margin_stock=float(row.approval.margin_stock),
+            margin_jit=float(row.approval.margin_jit),
+        )
+        if row.approval
+        else None,
         delivery=RecordedDelivery.model_validate(row.delivery, from_attributes=True)
         if row.delivery
         else None,
@@ -577,6 +625,9 @@ def _line(row: RfqLine) -> RecordedMatch:
         # both speak JSON, and a Decimal has nowhere to land in either.
         offer_unit_price=float(row.offer_unit_price) if row.offer_unit_price is not None else None,
         offer_received_at=row.offer_received_at,
+        approved_unit_price=float(row.approved_unit_price)
+        if row.approved_unit_price is not None
+        else None,
         candidates=[
             RecordedCandidate(
                 item_code=one.item_code,

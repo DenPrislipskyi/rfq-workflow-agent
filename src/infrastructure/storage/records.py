@@ -28,7 +28,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -179,6 +179,14 @@ class RecordedMatch(BaseModel):
     # by when we received it, and a browser whose clock is a day out must not
     # be able to date one.
     offer_received_at: datetime | None = None
+    # What this line sells for, per unit, as it stood when somebody approved
+    # the pricing. `None` until they do.
+    #
+    # Kept rather than recomputed, and that is the whole point of approving:
+    # cost and margin both move afterwards - a supplier requotes, the sheet is
+    # edited - and a quotation that quietly followed them would stop being the
+    # number the customer was given.
+    approved_unit_price: float | None = None
     # The product a person settled on, and the only thing on this line they
     # said rather than the agent. `None` is the whole of "nobody has confirmed
     # this line" - there is no second flag to disagree with it - and the value
@@ -205,6 +213,19 @@ class RecordedInquiry(BaseModel):
     # on the page are the page's, and a screen that renumbers rows must not
     # be able to repoint a letter that has already gone.
     lines: list[int] = Field(default_factory=list)
+
+
+class RecordedApproval(BaseModel):
+    """That somebody signed off the pricing of this RFQ, and with what.
+
+    The margins are kept beside the moment because they are the answer to "why
+    is this line priced so": the prices themselves are on the lines, and the
+    two numbers that produced them would otherwise be gone.
+    """
+
+    approved_at: datetime
+    margin_stock: float
+    margin_jit: float
 
 
 class RecordedDelivery(BaseModel):
@@ -265,6 +286,10 @@ class EmailRecord(BaseModel):
     # once, and a record of what was sent that could be rewritten afterwards
     # would not be a record of it.
     inquiries: list[RecordedInquiry] = Field(default_factory=list)
+    # Set once somebody approves the pricing. `None` is the whole of "nobody
+    # has", and there is no way back: a quotation that can be un-approved is a
+    # quotation nobody downstream can rely on.
+    approval: RecordedApproval | None = None
     delivery: RecordedDelivery | None = None
     form: RecordedFile | None = None
     # Set when the pipeline raised on this email. The record exists either way:
@@ -469,6 +494,46 @@ class EmailRecords:
                 _write(folder / RECORD, record)
         except Exception:
             logger.exception("Could not record the inquiries of %s", record_id)
+            return False
+
+        self._changes.announce()
+        return True
+
+    async def approve(
+        self,
+        record_id: str,
+        *,
+        approval: RecordedApproval,
+        prices: Mapping[int, float],
+    ) -> bool:
+        """Freeze what this RFQ sells for. True when it took.
+
+        False for a record that has none, and false for one already approved:
+        the sign-off happens once, and a second one would move a number the
+        customer may already have been quoted.
+
+        The prices and the moment land in the same write. A record that carried
+        an approval but not the prices it approved would describe a sign-off
+        on nothing.
+        """
+        if not self._enabled:
+            return False
+
+        try:
+            async with self._lock:
+                folder = self._root / record_id
+                record = _read(folder / RECORD)
+                if record is None or record.approval is not None:
+                    return False
+
+                for line in record.matching:
+                    if line.index in prices:
+                        line.approved_unit_price = prices[line.index]
+                record.approval = approval
+                record.updated_at = _now()
+                _write(folder / RECORD, record)
+        except Exception:
+            logger.exception("Could not approve the pricing of %s", record_id)
             return False
 
         self._changes.announce()

@@ -38,6 +38,7 @@ from src.infrastructure.storage.database import DatabaseRecords
 from src.infrastructure.storage.records import (
     DOWNLOAD_FAILED,
     EmailRecords,
+    RecordedApproval,
     RecordedCandidate,
     RecordedDelivery,
     RecordedExtraction,
@@ -635,3 +636,59 @@ async def test_asking_the_suppliers_leaves_the_lines_alone(store):
     await store.inquire(record_id, [_asking("Marinet Services Pte Ltd", 1)])
 
     assert (await _line(store, record_id, 1)).confirmed_item_code == "T65082300"
+
+
+def _signed(stock: float = 12.0, jit: float = 15.0) -> RecordedApproval:
+    return RecordedApproval(
+        approved_at=datetime(2026, 9, 25, 16, 40, tzinfo=UTC),
+        margin_stock=stock,
+        margin_jit=jit,
+    )
+
+
+async def test_an_rfq_starts_unapproved(store):
+    record_id = await _with_lines(store)
+
+    assert (await store.read(record_id)).approval is None
+    assert (await _line(store, record_id, 1)).approved_unit_price is None
+
+
+async def test_approving_freezes_the_prices_and_the_margins(store):
+    record_id = await _with_lines(store)
+
+    assert await store.approve(record_id, approval=_signed(), prices={1: 28.0, 2: 2.59}) is True
+
+    record = await store.read(record_id)
+    assert record.approval.margin_stock == 12.0
+    assert record.approval.margin_jit == 15.0
+    assert record.approval.approved_at == datetime(2026, 9, 25, 16, 40, tzinfo=UTC)
+    assert (await _line(store, record_id, 1)).approved_unit_price == 28.0
+    assert (await _line(store, record_id, 2)).approved_unit_price == 2.59
+
+
+async def test_the_pricing_is_approved_once(store):
+    """A second sign-off would move a number the customer may already have."""
+    record_id = await _with_lines(store)
+    await store.approve(record_id, approval=_signed(), prices={1: 28.0, 2: 2.59})
+
+    assert await store.approve(record_id, approval=_signed(99), prices={1: 99.0}) is False
+
+    record = await store.read(record_id)
+    assert record.approval.margin_stock == 12.0
+    assert (await _line(store, record_id, 1)).approved_unit_price == 28.0
+
+
+async def test_a_record_that_is_not_there_cannot_be_approved(store):
+    assert await store.approve("no-such-record", approval=_signed(), prices={1: 28.0}) is False
+
+
+async def test_an_approved_price_does_not_follow_the_supplier_afterwards(store):
+    """The whole point of approving: the quotation stops moving."""
+    record_id = await _with_lines(store)
+    await store.price(record_id, 1, 24.5)
+    await store.approve(record_id, approval=_signed(), prices={1: 28.0, 2: 2.59})
+
+    await store.price(record_id, 1, 99.0)
+
+    line = await _line(store, record_id, 1)
+    assert (line.offer_unit_price, line.approved_unit_price) == (99.0, 28.0)

@@ -1,6 +1,6 @@
 """What the pipeline needs from a record store, and nothing more.
 
-Six methods. Three write, three read, and both implementations answer them the
+Seven methods. Four write, three read, and both implementations answer them the
 same way - one against a folder on disk, one against Postgres and a blob
 container. The pipeline cannot tell which it has, which is the point: the
 tests run against the folder with no network, and the service runs against the
@@ -12,13 +12,14 @@ one takes it apart into rows and puts it back together on the way out. What the
 API renders is the same object either way.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from src.domain.models import ClassificationOutcome, NormalizedEmail
 from src.infrastructure.documents import SourceFile
 from src.infrastructure.storage.records import (
     EmailRecord,
+    RecordedApproval,
     RecordedDelivery,
     RecordedExtraction,
     RecordedInquiry,
@@ -106,6 +107,27 @@ class Records(Protocol):
         The whole batch at once, not one supplier at a time. One click sends
         every letter, and half of them on the record would describe a send
         that never happened.
+        """
+        ...
+
+    async def approve(
+        self,
+        record_id: str,
+        *,
+        approval: RecordedApproval,
+        prices: Mapping[int, float],
+    ) -> bool:
+        """Freeze what this RFQ sells for. True when it took.
+
+        False for a record that does not exist, and false for one already
+        approved: the sign-off happens once. There is no way back, and that is
+        deliberate - a quotation that can be un-approved is a quotation nobody
+        downstream can rely on.
+
+        Whether every line is covered is not asked here: a store holds what it
+        was told, and the endpoint has already refused an approval with holes
+        in it. What the store will not do is write the moment without the
+        prices it approved.
         """
         ...
 
