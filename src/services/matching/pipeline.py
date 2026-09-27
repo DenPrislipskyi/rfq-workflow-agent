@@ -26,13 +26,17 @@ that have one, because it is the same question.
 
 Only the last two produce a shortlist. A confirmed code produces one product,
 because there was nothing to choose between.
+
+Every product that comes out - the confirmed one, or each on a shortlist - is
+then scored against the line by the one `Scorer` the pipeline was given, all
+lines of the RFQ in one go (`scoring.py`).
 """
 
+import dataclasses
 import logging
-import re
 from collections.abc import Sequence
 
-from src.domain.rules.catalog import Candidate, Catalog, CatalogItem, tokenize
+from src.domain.rules.catalog import Candidate, Catalog, CatalogItem
 from src.services.extraction.models import LineItem
 from src.services.matching.judge import AgreementJudge
 from src.services.matching.models import (
@@ -43,6 +47,7 @@ from src.services.matching.models import (
     MatchedLine,
     ScoredItem,
 )
+from src.services.matching.scoring import Score, Scorer, WordCoverage
 
 logger = logging.getLogger(__name__)
 
@@ -61,16 +66,17 @@ NO_CODE = "The customer quoted no code, so the sheet was searched by the request
 # product answers a question nobody asked.
 Pair = tuple[str, str]
 
-# "65MM" is the number 65 with a unit stuck to it, and the sheet writes the
-# same size both ways. Only the scoring widens like this; the index does not.
-NUMBER_AND_UNIT = re.compile(r"^(\d+(?:[.,]\d+)?)([a-z]{1,4})$")
-
 
 class MatchingPipeline:
     """Turns the lines of one RFQ into products, or into reasons there are none."""
 
-    def __init__(self, judge: AgreementJudge, *, candidates: int = 5) -> None:
+    def __init__(
+        self, judge: AgreementJudge, *, scorer: Scorer | None = None, candidates: int = 5
+    ) -> None:
         self._judge = judge
+        # Counting words needs no model, so it is what a pipeline built without
+        # a scorer gets. Production passes the model-backed one.
+        self._scorer = scorer or WordCoverage()
         # How many products a line that had to be searched is narrowed down to.
         self._candidates = candidates
 
@@ -89,9 +95,14 @@ class MatchingPipeline:
         rows = [catalog.by_code(item.customer_item_code) for item in items]
         verdicts = await self._judged(items, rows)
 
-        matched = [
+        unscored = [
             self._one(item, row, verdicts.get(_pair(item, row)), catalog)
             for item, row in zip(items, rows, strict=True)
+        ]
+        scores = await self._scorer.score([(line.verbatim, _products(line)) for line in unscored])
+        matched = [
+            _scored(line, scored, ranks=self._scorer.ranks)
+            for line, scored in zip(unscored, scores, strict=True)
         ]
         _log(matched)
         return matched
@@ -136,10 +147,10 @@ class MatchingPipeline:
         # this pipeline did not check does not reach an order.
         same, why = verdict or (False, "")
         if same:
-            # The same score a candidate gets, from the same two sentences the
-            # judge just read. It is not what confirmed the code - the judge
-            # did that - but it says how much of the line the product accounts
-            # for, and a confirmation at 56% is one worth opening.
+            # Scored afterwards like any candidate, as a shortlist of one. The
+            # score is not what confirmed the code - the judge did that - but it
+            # says how much of the line the product accounts for, and a
+            # confirmation at 56% is one worth opening.
             return _line(
                 item,
                 query="",
@@ -147,7 +158,6 @@ class MatchingPipeline:
                 product=row,
                 how=CODE_CONFIRMED,
                 why=_and(CONFIRMED, why),
-                confidence=_covered(_words(item.description or ""), _words(row.description)),
             )
 
         # The same query as the branch below: the customer's own words. Their
@@ -193,57 +203,29 @@ def _and(reason: str, said: str) -> str:
     return f"{reason} {said}".strip() if said else reason
 
 
-def _scored(candidates: Sequence[Candidate], query: str) -> list[ScoredItem]:
-    """How much of what we searched for each candidate actually carries.
+def _products(line: MatchedLine) -> list[CatalogItem]:
+    """What gets scored for a line: its confirmed product, or its shortlist."""
+    if line.how == CODE_CONFIRMED and line.item is not None:
+        return [line.item]
+    return [one.item for one in line.candidates]
 
-    A percentage of the **query's** words, not of the best candidate's score.
-    The difference is the whole point: a score relative to the best one makes
-    the best one 100% by construction - it is divided by itself - so the top
-    row of every shortlist claimed certainty it never had, whether it was the
-    right bolt or a box of eggs.
 
-    Absolute, so it means the same thing on every line and can be read without
-    the rest of the list. Measured on the sheet: a query whose product is not
-    in the catalogue at all scores its top candidate 11-17%, and one whose
-    product is there scores it 43-60%. That gap is what the number is for.
+def _scored(line: MatchedLine, scores: Sequence[Score], *, ranks: bool) -> MatchedLine:
+    """The line with its scores in place.
 
-    Ranking stays BM25's job. It knows which words are rare, and rarity is
-    what tells two bolts apart; counting words does not. This only says how
-    much of the question each answer covers.
+    A shortlist is re-ordered by score only when the scorer judges products;
+    ties, and every unscored candidate, keep the search's order - the sort is
+    stable, and unscored ones go last.
     """
-    asked = _words(query)
-    return [
-        ScoredItem(
-            item=candidate.item,
-            confidence=_covered(asked, _words(candidate.item.description)),
-        )
-        for candidate in candidates
+    if line.how == CODE_CONFIRMED:
+        return dataclasses.replace(line, confidence=scores[0].confidence if scores else None)
+    candidates = [
+        ScoredItem(item=one.item, confidence=score.confidence, why=score.why)
+        for one, score in zip(line.candidates, scores, strict=True)
     ]
-
-
-def _words(text: str) -> set[str]:
-    """The words of one sentence, as this scoring counts them.
-
-    The search's own tokenizer, and then one thing more: a number welded to a
-    unit also counts as the bare number, so `65MM` and `65` are not two
-    different sizes. Nothing here reaches the index.
-    """
-    words: set[str] = set()
-    for word in tokenize(text):
-        words.add(word)
-        if match := NUMBER_AND_UNIT.match(word):
-            words.add(match.group(1))
-    return words
-
-
-def _covered(asked: set[str], offered: set[str]) -> int:
-    """A percentage of the words we asked with, not of the words it has.
-
-    An item described at length is not punished for saying more than it was
-    asked; a line whose every word is there is a full answer however much the
-    sheet goes on about it.
-    """
-    return round(100 * len(asked & offered) / len(asked)) if asked else 0
+    if ranks:
+        candidates.sort(key=lambda one: (one.confidence is None, -(one.confidence or 0)))
+    return dataclasses.replace(line, candidates=candidates)
 
 
 def _line(
@@ -254,7 +236,6 @@ def _line(
     product: CatalogItem | None = None,
     how: str,
     why: str,
-    confidence: int | None = None,
     candidates: Sequence[Candidate] = (),
 ) -> MatchedLine:
     return MatchedLine(
@@ -268,8 +249,8 @@ def _line(
         item=product,
         how=how,
         why=why,
-        confidence=confidence,
-        candidates=_scored(candidates, query),
+        # Unscored here; `_scored` fills them in once the whole RFQ is scored.
+        candidates=[ScoredItem(item=one.item) for one in candidates],
     )
 
 

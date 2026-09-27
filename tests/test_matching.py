@@ -20,6 +20,7 @@ from src.services.extraction.models import LineItem
 from src.services.matching import AgreementJudge, MatchingPipeline
 from src.services.matching.models import BY_SEARCH, CODE_CONFIRMED, CODE_REJECTED, NOTHING
 from src.services.matching.schemas import Judgement, Judgements
+from src.services.matching.scoring import Score
 from tests.fakes import BrokenLLM
 
 # Two bolts that differ by one size token; the fishing rod the desk put in the
@@ -400,3 +401,99 @@ async def test_an_rfq_with_no_lines_costs_no_calls():
 
     assert await pipeline(judge).run([], catalog()) == []
     assert judge.batches == []
+
+
+# --- the confidence a matched product carries ------------------------------
+
+
+class Fixed:
+    """A scorer that hands out prepared scores and remembers what it was asked."""
+
+    def __init__(self, scores, *, ranks: bool = True) -> None:
+        self._scores = scores
+        self.ranks = ranks
+        self.asked: list[tuple[str, list[str]]] = []
+
+    async def score(self, questions):
+        self.asked = [(asked, [one.code for one in products]) for asked, products in questions]
+        return [self._scores(asked, products) for asked, products in questions]
+
+
+def by_code(table):
+    return lambda asked, products: [Score(*table.get(one.code, (None, ""))) for one in products]
+
+
+async def test_a_shortlist_is_reranked_by_the_score_that_judges_it():
+    """The search put the M16 first; the scorer ruled it out."""
+    scorer = Fixed(by_code({"T69128400": (0, "size differs"), "T69133100": (100, "same size")}))
+    items = [line(1, "hexagon head bolts with nut, full thread M20 x 80")]
+
+    [matched] = await MatchingPipeline(
+        AgreementJudge(Judging()), scorer=scorer, candidates=5
+    ).run(items, catalog())
+
+    assert matched.candidates[0].item.code == "T69133100"
+    assert (matched.candidates[0].confidence, matched.candidates[0].why) == (100, "same size")
+
+
+async def test_ties_and_unscored_candidates_keep_the_search_s_order():
+    scorer = Fixed(by_code({"T69133100": (50, ""), "T69128400": (50, "")}))
+    items = [line(1, "hexagon head bolts with nut, full thread M20 x 80")]
+    searched = [one.item.code for one in catalog().search(items[0].description, limit=5)]
+
+    [matched] = await MatchingPipeline(
+        AgreementJudge(Judging()), scorer=scorer, candidates=5
+    ).run(items, catalog())
+
+    ordered = [one.item.code for one in matched.candidates]
+    scored = [code for code in searched if code in ("T69133100", "T69128400")]
+    assert ordered[: len(scored)] == scored, "equal scores keep the search's order"
+    unscored = matched.candidates[len(scored) :]
+    assert all(one.confidence is None for one in unscored), "unscored go last"
+
+
+async def test_a_scorer_that_does_not_judge_products_leaves_the_order_alone():
+    scorer = Fixed(by_code({"T69133100": (100, "")}), ranks=False)
+    items = [line(1, "hexagon head bolts with nut, full thread M20 x 80")]
+    searched = [one.item.code for one in catalog().search(items[0].description, limit=5)]
+
+    [matched] = await MatchingPipeline(
+        AgreementJudge(Judging()), scorer=scorer, candidates=5
+    ).run(items, catalog())
+
+    assert [one.item.code for one in matched.candidates] == searched
+
+
+async def test_a_confirmed_code_is_scored_as_a_shortlist_of_one():
+    scorer = Fixed(by_code({"T69128400": (96, "brand unconfirmed")}))
+    items = [line(1, "Hexagon Head Bolts (Bolt with Nut) M16*65", "691284")]
+
+    [matched] = await MatchingPipeline(
+        AgreementJudge(Judging()), scorer=scorer, candidates=5
+    ).run(items, catalog())
+
+    assert matched.how == CODE_CONFIRMED
+    assert matched.confidence == 96
+    assert scorer.asked == [("Hexagon Head Bolts (Bolt with Nut) M16*65", ["T69128400"])]
+
+
+async def test_every_line_of_an_rfq_is_scored_in_one_go_against_its_own_words():
+    scorer = Fixed(by_code({}))
+    items = [line(1, "bolts M20 x 80"), line(2, "portable drive 4TB")]
+
+    await MatchingPipeline(AgreementJudge(Judging()), scorer=scorer, candidates=2).run(
+        items, catalog()
+    )
+
+    assert [asked for asked, _ in scorer.asked] == ["bolts M20 x 80", "portable drive 4TB"]
+
+
+async def test_a_refusal_has_nothing_to_score():
+    scorer = Fixed(by_code({}))
+
+    [matched] = await MatchingPipeline(AgreementJudge(Judging()), scorer=scorer).run(
+        [line(1, "zzzz qqqq")], catalog()
+    )
+
+    assert matched.how == NOTHING
+    assert matched.candidates == [] and matched.confidence is None

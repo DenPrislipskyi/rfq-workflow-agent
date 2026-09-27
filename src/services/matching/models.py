@@ -14,15 +14,17 @@ NOTHING = "none"
 
 @dataclass(frozen=True, slots=True)
 class ScoredItem:
-    """One candidate as it reaches a record: the product, and the score.
+    """One candidate as it reaches a record: the product, its score, and why.
 
-    The score is how much of what we searched for this product carries, 0-100.
-    Absolute, so it reads the same on every line: 11-17% is what a shortlist
-    scores when the thing asked for is not in the catalogue at all.
+    The score is 0-100 and absolute, so it reads the same on every line - how
+    it is worked out is the `Scorer`'s business (`scoring.py`). `None` where
+    the scorer could not score this line; `why` is what the scorer observed,
+    empty for a score that has no reason to give.
     """
 
     item: CatalogItem
-    confidence: int = 0
+    confidence: int | None = None
+    why: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,9 +50,9 @@ class MatchedLine:
     item: CatalogItem | None = None
     how: str = NOTHING
     why: str = ""
-    # The shortlist, in the order the search ranked it, each scored against
-    # the best of its own line. Empty for a confirmed code: there was nothing
-    # to choose between.
+    # The shortlist, each candidate scored against the line - in the search's
+    # order, or re-ranked by score where the scorer judges products. Empty for
+    # a confirmed code: there was nothing to choose between.
     candidates: list["ScoredItem"] = field(default_factory=list)
     # How much of the line this product accounts for, 0-100. The same score a
     # candidate carries, and on a confirmed code it comes from the same two
