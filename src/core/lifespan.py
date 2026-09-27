@@ -29,7 +29,14 @@ from src.services.catalog import CatalogService
 from src.services.classification.pipeline import ClassificationPipeline
 from src.services.extraction import ExtractionPipeline, FileReader, HeaderReader
 from src.services.handlers import ClassifyingEmailHandler
-from src.services.matching import AgreementJudge, MatchingPipeline
+from src.services.matching import (
+    AgreementJudge,
+    AssessedConfidence,
+    CandidateAssessor,
+    MatchingPipeline,
+    Scorer,
+    WordCoverage,
+)
 from src.services.notification_service import NotificationService
 from src.services.triage import EmailTriage
 from src.services.workbook import WorkbookBuilder
@@ -209,7 +216,24 @@ def build_matching(settings: Settings, llms: LLMRegistry) -> MatchingPipeline | 
             batch=settings.MATCHING_JUDGE_BATCH,
             concurrency=settings.MATCHING_JUDGE_CONCURRENCY,
         ),
+        scorer=build_scorer(settings, llms),
         candidates=settings.CATALOG_SHORTLIST,
+    )
+
+
+def build_scorer(settings: Settings, llms: LLMRegistry) -> Scorer:
+    """How a matched product's confidence is worked out - see
+    `MATCHING_CONFIDENCE`. The text model, like the judge: it reads two
+    descriptions and opens no file."""
+    if settings.MATCHING_CONFIDENCE == "words":
+        logger.info("MATCHING_CONFIDENCE=words - confidence is the share of the line's words")
+        return WordCoverage()
+    return AssessedConfidence(
+        CandidateAssessor(
+            llms.text,
+            batch=settings.MATCHING_ASSESS_BATCH,
+            concurrency=settings.MATCHING_JUDGE_CONCURRENCY,
+        )
     )
 
 

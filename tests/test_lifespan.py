@@ -5,11 +5,16 @@ opened. Everything else in `lifespan` is construction, and the tests for each
 piece live next to that piece.
 """
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi import FastAPI
 
 from src.core import lifespan as lifespan_module
-from tests.fakes import fake_settings
+from src.core.lifespan import build_scorer
+from src.services.matching import AssessedConfidence, WordCoverage
+from src.services.matching.schemas import LineChecks
+from tests.fakes import FakeLLM, fake_settings
 
 
 @pytest.fixture
@@ -69,3 +74,13 @@ async def test_triage_is_built_either_way(monkeypatch, no_subscription_calls) ->
     """The endpoint must not depend on the mailbox integration being available."""
     for outlook in (True, False):
         await run_lifespan(monkeypatch, outlook=outlook)
+
+
+def test_confidence_is_assessed_unless_the_setting_says_words():
+    """The model-backed score by default; counting words when it is switched off."""
+    llms = SimpleNamespace(text=FakeLLM(LineChecks()))
+
+    assert isinstance(build_scorer(fake_settings(), llms), AssessedConfidence)
+    assert isinstance(
+        build_scorer(fake_settings(MATCHING_CONFIDENCE="words"), llms), WordCoverage
+    )

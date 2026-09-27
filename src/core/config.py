@@ -193,6 +193,18 @@ class Settings(BaseSettings):
     # Batches in flight at once, so that a long RFQ costs the latency of one
     # call rather than of four.
     MATCHING_JUDGE_CONCURRENCY: int = 4
+    # How a matched product's confidence is worked out.
+    #
+    #   assessed  a model observes each candidate - same product? which
+    #             properties agree, conflict, or go unstated? - and a formula
+    #             scores that (`services/matching/confidence.py`). Tells four
+    #             sneakers that differ only in size from the one that was asked.
+    #   words     the share of the line's words the product carries. No model,
+    #             and no way to tell a variant from a match.
+    MATCHING_CONFIDENCE: Literal["assessed", "words"] = "assessed"
+    # Lines per assessment call. Each carries its whole shortlist, so twenty
+    # lines ask about as many products as the judge's fifty pairs.
+    MATCHING_ASSESS_BATCH: int = 20
 
     # --- The browser ------------------------------------------------------------
     # Origins allowed to call this API from a page, comma separated. The front
