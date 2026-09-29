@@ -1,6 +1,8 @@
 """Turn the desk's exported `Quote.xlsm` into the blank the quotation fills.
 
     uv run python -m src.tools.make_quote_template docs/samples/Quote.xlsm
+    uv run python -m src.tools.make_quote_template --restyle \\
+        config/quotation_sg_uae_workbook_template.xlsm
 
 The export is a real customer's, so it lives in `docs/samples/` - out of git
 and out of the image - and only the blank this makes is shipped.
@@ -16,8 +18,14 @@ rewritten as inline strings and the table emptied, so no previous customer's
 name travels inside the template. The line sheet is renamed to a placeholder,
 and the names of whoever last saved the file are taken out of its properties.
 
+Every font is set to one face and one size - Arial 10 - keeping only bold,
+italic, underline and colour. The export mixes Arial 8, 10, 11, 12 and 14 with
+Calibri 11 and 12, and a quotation whose cells change size from one to the next
+reads as a mistake. `--restyle` does only this, to a template already made:
+the export it was made from need not be kept.
+
 Kept byte for byte: the VBA project and its `Print` button, the logo, the
-styles, the protection, the printer settings.
+protection, the printer settings.
 """
 
 import argparse
@@ -30,6 +38,7 @@ from src.services.quote_workbook import (
     CORE,
     DETAILS,
     SHARED,
+    STYLES,
     SUMMARY,
     WORKBOOK,
     FALLBACK_SHEET,
@@ -60,6 +69,47 @@ _REPAIRS = (
     ("<f ca=\"1\">=H4</f>", "<f ca=\"1\">H4</f>"),
     ("SUM(J20: J22)", "SUM(J20:J22)"),
 )
+
+FONT = "Arial"
+SIZE = "10"
+
+_FONTS = re.compile(r"<fonts\b[^>]*>.*?</fonts>", re.DOTALL)
+_FONT = re.compile(r"<font>(.*?)</font>|<font\s*/>", re.DOTALL)
+# What a font says about face and size - and `scheme`, which ties it to the
+# theme's font and would let Excel put Calibri back.
+_FACE = re.compile(r"<(?:sz|name|family|scheme)\b[^>]*/>")
+
+
+def uniform_fonts(styles: str) -> str:
+    """The style sheet with every cell font in one face and size.
+
+    Only the `<fonts>` table is touched: bold, italic, underline and colour
+    stay, and the conditional formats' own fonts - colour only - are left
+    alone.
+    """
+
+    def one(match: re.Match[str]) -> str:
+        kept = _FACE.sub("", match.group(1) or "")
+        return f'<font>{kept}<sz val="{SIZE}" /><name val="{FONT}" /></font>'
+
+    table = _FONTS.search(styles)
+    if table is None:
+        raise ValueError("the workbook has no font table")
+    return styles[: table.start()] + _FONT.sub(one, table.group(0)) + styles[table.end() :]
+
+
+def restyle(template: bytes) -> bytes:
+    """The same workbook with `uniform_fonts` applied, every other part as it was."""
+    with zipfile.ZipFile(io.BytesIO(template)) as master:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as copy:
+            for entry in master.infolist():
+                data = master.read(entry.filename)
+                if entry.filename == STYLES:
+                    data = uniform_fonts(data.decode("utf-8")).encode("utf-8")
+                copy.writestr(entry, data)
+    return buffer.getvalue()
+
 
 BLANK = QuoteBook(
     office=Office(location="", address="", phone="", email="", tax_reg=""),
@@ -120,7 +170,7 @@ def build(source: Path, out: Path) -> None:
 
     # Clearing is filling with nothing: the same code that writes a quotation
     # writes the blank, so the two cannot disagree about which cells are ours.
-    blank = fill(inlined.getvalue(), BLANK)
+    blank = restyle(fill(inlined.getvalue(), BLANK))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(blank)
 
@@ -129,12 +179,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("source", type=Path, help="a Quote.xlsm SCINT exported")
     parser.add_argument(
+        "--restyle",
+        action="store_true",
+        help="only set one font and size in SOURCE, an already made template, in place",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=Path("config/quotation_sg_uae_workbook_template.xlsm"),
         help="where to write the blank",
     )
     args = parser.parse_args()
+    if args.restyle:
+        args.source.write_bytes(restyle(args.source.read_bytes()))
+        print(f"Restyled {args.source}")
+        return
     build(args.source, args.out)
     print(f"Wrote {args.out}")
 

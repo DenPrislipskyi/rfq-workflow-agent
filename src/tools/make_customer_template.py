@@ -26,6 +26,12 @@ HEADINGS = ("Category", "SN", "Code", "Description", "Unit", "Qty", "Unit Prc", 
 WIDTHS = {"A": 11.38, "B": 14.5, "C": 14.5, "D": 70.13, "E": 14.5, "F": 14.5, "G": 14.5, "H": 14.5}
 ROW_HEIGHT = 15.75
 
+# One face and one size in the whole file, as the desk asked: every cell we
+# write, and the workbook's own default - the one an empty cell, a cell the
+# customer types into, and Excel's row heights all follow.
+FONT = "Arial"
+SIZE = 10
+
 HEADING_FILL = "FFCCF2F4"
 ROW_FILL = "FFE0F9F9"
 # The column the customer's code goes in. Text, not a number: `04361753` is a
@@ -35,6 +41,11 @@ CODE_COLUMN = "C"
 
 def build(out: Path) -> None:
     book = Workbook()
+    # The default font is font 0 and the Normal style's; openpyxl exposes
+    # neither publicly, and leaving them Calibri 11 is what made an untouched
+    # cell read differently from its neighbours.
+    book._fonts[0] = Font(name=FONT, size=SIZE)
+    book._named_styles["Normal"].font = Font(name=FONT, size=SIZE)
     sheet = book.active
     sheet.title = SHEET
     sheet.sheet_format.defaultRowHeight = ROW_HEIGHT
@@ -46,13 +57,13 @@ def build(out: Path) -> None:
 
     for column, heading in enumerate(HEADINGS, start=1):
         cell = sheet.cell(row=1, column=column, value=heading)
-        cell.font = Font(name="Arial", size=10, bold=True, color=ink)
+        cell.font = Font(name=FONT, size=SIZE, bold=True, color=ink)
         cell.fill = PatternFill("solid", fgColor=HEADING_FILL, bgColor=HEADING_FILL)
         cell.border = border
         cell.alignment = Alignment(horizontal="center")
 
         model = sheet.cell(row=2, column=column)
-        model.font = Font(name="Arial", size=10, color=ink)
+        model.font = Font(name=FONT, size=SIZE, color=ink)
         model.fill = PatternFill("solid", fgColor=ROW_FILL, bgColor=ROW_FILL)
         model.border = border
         if model.column_letter == CODE_COLUMN:

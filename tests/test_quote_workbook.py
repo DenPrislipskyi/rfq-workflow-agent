@@ -24,7 +24,7 @@ from src.services.quote_workbook import (
     fill,
     sheet_name,
 )
-from src.tools.make_quote_template import build
+from src.tools.make_quote_template import build, restyle, uniform_fonts
 
 CONFIG = Path(__file__).parents[1] / "config"
 TEMPLATE = CONFIG / "quotation_sg_uae_workbook_template.xlsm"
@@ -239,3 +239,58 @@ def test_every_formula_is_one_excel_itself_would_write():
             for formula in formulas:
                 assert not formula.startswith("="), formula
                 assert ": " not in formula and " :" not in formula, formula
+
+
+def _fonts(workbook: bytes) -> str:
+    styles = zipfile.ZipFile(io.BytesIO(workbook)).read("xl/styles.xml").decode("utf-8")
+    return re.search(r"<fonts\b.*?</fonts>", styles, re.DOTALL).group(0)
+
+
+def test_one_font_and_one_size_in_the_whole_workbook():
+    """The export mixed Arial 8 to 14 with Calibri 11 and 12; a quotation whose
+    cells change size from one to the next reads as a mistake."""
+    for office in (DUBAI_OFFICE, SINGAPORE_OFFICE):
+        table = _fonts(filled(book(line(1), line(2), office=office)))
+
+        assert set(re.findall(r'<name val="([^"]+)"', table)) == {"Arial"}
+        assert set(re.findall(r'<sz val="([^"]+)"', table)) == {"10"}
+        assert "scheme" not in table, "a theme font would let Excel put Calibri back"
+
+
+def test_every_filled_cell_reads_arial_10():
+    workbook = opened(filled(book(line(1), line(2))))
+
+    for sheet in workbook.worksheets:
+        for row in sheet.iter_rows():
+            for cell in row:
+                if cell.value not in (None, ""):
+                    assert (cell.font.name, cell.font.sz) == ("Arial", 10), cell.coordinate
+
+
+def test_uniform_fonts_keeps_bold_underline_and_colour():
+    styles = (
+        '<styleSheet><fonts count="2">'
+        '<font><b /><u /><sz val="14" /><color rgb="FFFF0000" /><name val="Calibri" />'
+        '<family val="2" /><scheme val="minor" /></font>'
+        '<font><sz val="8" /><name val="Arial" /></font>'
+        "</fonts><dxfs><dxf><font><color theme=\"0\" /></font></dxf></dxfs></styleSheet>"
+    )
+
+    fonts, _, rest = uniform_fonts(styles).partition("</fonts>")
+
+    assert fonts.count('<sz val="10" /><name val="Arial" />') == 2
+    assert '<b /><u /><color rgb="FFFF0000" />' in fonts
+    assert "Calibri" not in fonts and "scheme" not in fonts and "family" not in fonts
+    assert '<font><color theme="0" /></font>' in rest, "conditional formats are left alone"
+
+
+def test_restyle_changes_nothing_but_the_fonts():
+    before = TEMPLATE.read_bytes()
+    after = restyle(before)
+
+    with zipfile.ZipFile(io.BytesIO(before)) as old, zipfile.ZipFile(io.BytesIO(after)) as new:
+        assert old.namelist() == new.namelist()
+        for name in old.namelist():
+            if name != "xl/styles.xml":
+                assert old.read(name) == new.read(name), name
+

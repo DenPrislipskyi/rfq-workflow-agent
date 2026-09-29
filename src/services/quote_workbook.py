@@ -40,6 +40,7 @@ DETAILS = "xl/worksheets/sheet2.xml"
 WORKBOOK = "xl/workbook.xml"
 CORE = "docProps/core.xml"
 SHARED = "xl/sharedStrings.xml"
+STYLES = "xl/styles.xml"
 
 # The row the template's one line sits on, and which every line is copied from.
 MODEL_ROW = 11

@@ -6,6 +6,8 @@ and the approved numbers as numbers.
 """
 
 from decimal import Decimal
+import re
+import zipfile
 from io import BytesIO
 from pathlib import Path
 
@@ -94,3 +96,16 @@ def test_every_row_takes_the_template_s_look():
 def test_no_lines_leaves_no_empty_row():
     """A styled empty row reads as a line somebody forgot to fill in."""
     assert rows_of(fill(TEMPLATE.read_bytes(), [])) == [HEADINGS]
+
+
+def test_one_font_and_one_size_in_the_whole_file():
+    """Arial 10 in every cell we write and in the workbook's own default - the
+    one an empty cell and a cell the customer types into will use."""
+    filled = fill(TEMPLATE.read_bytes(), [line(1), line(2)])
+    styles = zipfile.ZipFile(BytesIO(filled)).read("xl/styles.xml").decode()
+    table = re.search(r"<fonts.*?</fonts>", styles, re.DOTALL).group(0)
+
+    assert set(re.findall(r'<name val="([^"]+)"', table)) == {"Arial"}
+    assert set(re.findall(r'<sz val="([^"]+)"', table)) == {"10"}
+    assert sheet_of(filled)["Z99"].font.name == "Arial", "an untouched cell too"
+
