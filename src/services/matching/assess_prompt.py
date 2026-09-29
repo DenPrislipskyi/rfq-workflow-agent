@@ -45,6 +45,10 @@ For every candidate you report two things.
      "M14" and "M16" are not.
 
 Rules:
+- A candidate that is not the same kind of product gets same_product false,
+  NO properties, and a why of a few words ("a sugar, not a bacon"). Nothing
+  about its properties can change that, so do not spend words on them.
+- Keep every why under fifteen words.
 - Wording is not a property. Word order, abbreviations ("hex" for
   "hexagon"), plurals, punctuation and reference labels ("RefNo:", "Part
   no.") are not differences.
@@ -79,7 +83,7 @@ EXAMPLES = """Examples:
 
   line: Welding goggles
     1. WELDER GLOVES FIVE FINGERS
-  -> 1: same_product false
+  -> 1: same_product false, no properties, why "gloves, not goggles"
 """
 
 INSTRUCTION = (

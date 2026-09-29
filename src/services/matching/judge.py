@@ -53,7 +53,9 @@ class AgreementJudge:
     ) -> None:
         self._llm = llm
         self._batch = batch
-        self._concurrency = concurrency
+        # Shared by every RFQ this instance judges, for the same reason as the
+        # assessor's: one limit on calls in flight for the whole service.
+        self._limit = asyncio.Semaphore(concurrency)
 
     async def run(self, pairs: Sequence[tuple[str, str]]) -> list[tuple[bool, str]]:
         """One verdict per `(line, product)` pair, in the order they came in.
@@ -69,9 +71,8 @@ class AgreementJudge:
             return verdicts
 
         starts = range(0, len(pairs), self._batch)
-        limit = asyncio.Semaphore(self._concurrency)
         answered = await asyncio.gather(
-            *(self._one(pairs[start : start + self._batch], limit) for start in starts)
+            *(self._one(pairs[start : start + self._batch]) for start in starts)
         )
 
         for start, judged in zip(starts, answered, strict=True):
@@ -81,11 +82,9 @@ class AgreementJudge:
 
         return verdicts
 
-    async def _one(
-        self, batch: Sequence[tuple[str, str]], limit: asyncio.Semaphore
-    ) -> dict[int, tuple[bool, str]]:
+    async def _one(self, batch: Sequence[tuple[str, str]]) -> dict[int, tuple[bool, str]]:
         """One call. An empty answer means every pair in it stays unagreed."""
-        async with limit:
+        async with self._limit:
             try:
                 answer = await self._llm.invoke(build_messages(batch), Judgements)
             except LLMError as error:

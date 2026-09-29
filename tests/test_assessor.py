@@ -5,12 +5,13 @@ the numbering, and above all what happens to an answer that is incomplete,
 invented or missing: none of those may turn into a confident score.
 """
 
+import asyncio
 import re
 
 from src.infrastructure.llm.client import LLMResult, Messages
 from src.infrastructure.llm.exceptions import LLMCallError
 from src.services.matching.assess_prompt import build_messages, differences
-from src.services.matching.assessor import CandidateAssessor
+from src.services.matching.assessor import BATCH, CandidateAssessor
 from src.services.matching.confidence import Agreement
 from src.services.matching.schemas import CandidateCheck, LineCheck, LineChecks, PropertyCheck
 from tests.fakes import BrokenLLM
@@ -174,6 +175,19 @@ def test_the_prompt_shows_descriptions_and_never_an_item_code():
     assert "T19036300" not in human[1]
 
 
+def test_the_prompt_spends_no_words_on_a_candidate_that_is_another_product():
+    """A different product scores 0 whatever its properties, and describing
+    them anyway is what made one call outrun its timeout."""
+    system, _ = build_messages([SNEAKERS])
+
+    assert "NO properties" in system[1]
+
+
+def test_one_line_per_call_unless_told_otherwise():
+    """Twenty lines in one call ran past the timeout on a real RFQ."""
+    assert BATCH == 1
+
+
 def test_the_prompt_points_at_what_the_candidates_differ_in():
     _, human = build_messages([SNEAKERS])
 
@@ -185,3 +199,31 @@ def test_differences_are_the_words_not_every_candidate_carries():
 
     assert differences(shortlist) == ["25cm", "29", "cm"]
     assert differences(["ONE PRODUCT"]) == [], "one product differs from nothing"
+
+
+class Crowded:
+    """A model that takes a moment per call and remembers the most it had at once."""
+
+    def __init__(self) -> None:
+        self.now = 0
+        self.most = 0
+
+    async def invoke(self, messages, schema):
+        self.now += 1
+        self.most = max(self.most, self.now)
+        await asyncio.sleep(0.01)
+        self.now -= 1
+        return LLMResult(value=LineChecks(), model="fake", latency_ms=1)
+
+
+async def test_every_rfq_shares_one_limit_on_calls_in_flight():
+    """Three RFQs at once may not open three times as many calls: the provider's
+    rate limit is one limit for the whole service."""
+    model = Crowded()
+    assessor = CandidateAssessor(model, batch=1, concurrency=2)
+    rfq = [(f"line {n}", ["SOMETHING"]) for n in range(4)]
+
+    await asyncio.gather(assessor.run(rfq), assessor.run(rfq), assessor.run(rfq))
+
+    assert model.most == 2
+

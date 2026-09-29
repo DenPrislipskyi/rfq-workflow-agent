@@ -232,7 +232,7 @@ def build_scorer(settings: Settings, llms: LLMRegistry) -> Scorer:
         CandidateAssessor(
             llms.text,
             batch=settings.MATCHING_ASSESS_BATCH,
-            concurrency=settings.MATCHING_JUDGE_CONCURRENCY,
+            concurrency=settings.MATCHING_ASSESS_CONCURRENCY,
         )
     )
 

@@ -23,10 +23,15 @@ from src.services.matching.schemas import CandidateCheck, LineCheck, LineChecks,
 
 logger = logging.getLogger(__name__)
 
-# Lines per call. Each carries up to five candidates, so twenty lines ask about
-# as many products as the judge's fifty pairs do.
-BATCH = 20
-CONCURRENCY = 4
+# Lines per call: one. The answer is long - every property of up to five
+# candidates - and a call's time grows with it: twenty lines in one call ran
+# past the 30 s timeout on a real RFQ and left all of them unscored, while one
+# line per call came back in 12 s at worst. One line per call also means a
+# failed call costs one line its score, not its neighbours'.
+BATCH = 1
+# Calls in flight at once across the whole service - every RFQ shares them.
+# Eight keeps an RFQ of twenty lines to the time of about three calls.
+CONCURRENCY = 8
 
 # One line and the descriptions of its candidates, in shortlist order.
 type Shortlist = tuple[str, Sequence[str]]
@@ -38,7 +43,11 @@ class CandidateAssessor:
     def __init__(self, llm: LLM, *, batch: int = BATCH, concurrency: int = CONCURRENCY) -> None:
         self._llm = llm
         self._batch = batch
-        self._concurrency = concurrency
+        # One limit for every RFQ this instance serves, not one per call to
+        # `run`: the service builds a single assessor, so three RFQs arriving
+        # together share these slots instead of opening three times as many
+        # calls and running into the provider's rate limit.
+        self._limit = asyncio.Semaphore(concurrency)
 
     async def run(self, lines: Sequence[Shortlist]) -> list[list[Assessment] | None]:
         """One entry per line, in order: its candidates' assessments, or None
@@ -55,20 +64,17 @@ class CandidateAssessor:
         batches = [
             asked[start : start + self._batch] for start in range(0, len(asked), self._batch)
         ]
-        limit = asyncio.Semaphore(self._concurrency)
         answers = await asyncio.gather(
-            *(self._one([lines[index] for index in batch], limit) for batch in batches)
+            *(self._one([lines[index] for index in batch]) for batch in batches)
         )
         for batch, answer in zip(batches, answers, strict=True):
             for position, index in enumerate(batch):
                 assessed[index] = answer.get(position)
         return assessed
 
-    async def _one(
-        self, batch: Sequence[Shortlist], limit: asyncio.Semaphore
-    ) -> dict[int, list[Assessment]]:
+    async def _one(self, batch: Sequence[Shortlist]) -> dict[int, list[Assessment]]:
         """One call. A failed call leaves every line in it unassessed."""
-        async with limit:
+        async with self._limit:
             try:
                 answer = await self._llm.invoke(build_messages(batch), LineChecks)
             except LLMError as error:

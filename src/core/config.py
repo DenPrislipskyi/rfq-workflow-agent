@@ -190,8 +190,9 @@ class Settings(BaseSettings):
     # a numbered list a model answers without quietly dropping an entry, and on
     # what one failed call costs.
     MATCHING_JUDGE_BATCH: int = 50
-    # Batches in flight at once, so that a long RFQ costs the latency of one
-    # call rather than of four.
+    # Batches in flight at once across the whole service, so that a long RFQ
+    # costs the latency of one call rather than of four, and a burst of RFQs
+    # shares the same slots.
     MATCHING_JUDGE_CONCURRENCY: int = 4
     # How a matched product's confidence is worked out.
     #
@@ -202,9 +203,15 @@ class Settings(BaseSettings):
     #   words     the share of the line's words the product carries. No model,
     #             and no way to tell a variant from a match.
     MATCHING_CONFIDENCE: Literal["assessed", "words"] = "assessed"
-    # Lines per assessment call. Each carries its whole shortlist, so twenty
-    # lines ask about as many products as the judge's fifty pairs.
-    MATCHING_ASSESS_BATCH: int = 20
+    # Lines per assessment call. One: the answer covers every property of the
+    # whole shortlist, and twenty lines in one call outran `LLM_TIMEOUT_S` on a
+    # real RFQ and left every line unscored. One line came back in 12 s at worst.
+    MATCHING_ASSESS_BATCH: int = 1
+    # Assessment calls in flight at once, across the whole service: every RFQ
+    # being matched shares these, so a burst of RFQs cannot multiply them past
+    # the provider's rate limit. With one line per call, eight keeps an RFQ of
+    # twenty lines to the time of about three calls.
+    MATCHING_ASSESS_CONCURRENCY: int = 8
 
     # --- The browser ------------------------------------------------------------
     # Origins allowed to call this API from a page, comma separated. The front

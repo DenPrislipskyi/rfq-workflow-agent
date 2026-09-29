@@ -11,6 +11,7 @@ leads to.** A code is one claim and the words beside it are another; where they
 disagree the words win, because the words are what the customer is asking for.
 """
 
+import asyncio
 import re
 
 from src.domain.rules.catalog import Catalog
@@ -497,3 +498,26 @@ async def test_a_refusal_has_nothing_to_score():
 
     assert matched.how == NOTHING
     assert matched.candidates == [] and matched.confidence is None
+
+
+async def test_every_rfq_shares_one_limit_on_judge_calls_in_flight():
+    """The same limit the assessor keeps, for the same reason."""
+
+    class Crowded:
+        now = 0
+        most = 0
+
+        async def invoke(self, messages, schema):
+            Crowded.now += 1
+            Crowded.most = max(Crowded.most, Crowded.now)
+            await asyncio.sleep(0.01)
+            Crowded.now -= 1
+            return LLMResult(value=Judgements(), model="fake", latency_ms=1)
+
+    judge = AgreementJudge(Crowded(), batch=1, concurrency=2)
+    pairs = [(f"line {n}", "ITEM") for n in range(4)]
+
+    await asyncio.gather(judge.run(pairs), judge.run(pairs), judge.run(pairs))
+
+    assert Crowded.most == 2
+
