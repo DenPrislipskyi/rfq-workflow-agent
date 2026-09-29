@@ -15,12 +15,14 @@ read - is in the record, one line away from being shown.
 """
 
 import asyncio
+import base64
 import logging
 from collections.abc import AsyncIterator, Mapping
 import re
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -46,7 +48,16 @@ from src.infrastructure.storage.records import (
     RecordedMatch,
 )
 from src.services import customer_file, quote_workbook
-from src.services.quotation import DUBAI, SINGAPORE, Issuer, Quotation, QuotedLine, render
+from src.services.quotation import (
+    DUBAI,
+    SINGAPORE,
+    Issuer,
+    Layout,
+    Quotation,
+    QuotedLine,
+    layout,
+    render,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -432,18 +443,7 @@ async def download_quotation(
     form adds discount and VAT columns.
     """
     record, detail = await _approved(record_id, records, catalog)
-    quotation = Quotation(
-        issuer=LETTERHEADS[format],
-        number=detail.reference,
-        customer=detail.customer_name,
-        customer_email=detail.customer_name,
-        port=detail.port,
-        vessel=detail.vessel_name,
-        imo=detail.imo,
-        received_on=date.fromisoformat(detail.received_on) if detail.received_on else None,
-        approved_at=record.approval.approved_at,
-        lines=[_quoted(row) for row in detail.lines],
-    )
+    quotation = _quotation(record, detail, format)
     # ReportLab is synchronous and a long RFQ takes it a noticeable moment;
     # the event loop has the stream and every other page to serve meanwhile.
     pdf = await asyncio.to_thread(render, quotation, logo)
@@ -452,6 +452,79 @@ async def download_quotation(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{_filename(detail)}"'},
     )
+
+
+class PreviewPanel(Wire):
+    """One grey-headed block of the form, and its label/value rows."""
+
+    title: str
+    rows: list[tuple[str, str]]
+    tall: bool = False
+
+
+class PreviewColumn(Wire):
+    name: str
+    # `left`, `center` or `right`, as the PDF aligns the column's cells.
+    align: str
+    # In points, as the PDF sets it. A preview divides its width in the same
+    # proportions, so the table reads the same on screen as on paper.
+    width: float
+
+
+class PreviewTotal(Wire):
+    label: str
+    value: str
+    strong: bool = False
+    shaded: bool = False
+
+
+class PreviewLetterhead(Wire):
+    name: str
+    address: str
+    registration: str = ""
+    phone: str
+    email: str
+    web: str
+
+
+class QuotationPreview(Wire):
+    """The PDF's content, block by block, for the screen to draw.
+
+    The same `layout` the PDF is drawn from - so the preview says exactly what
+    the download will, and what only paper has (pages, `Page n of N`) is left
+    to paper.
+    """
+
+    # The mark as a data URI, so the page needs no second request and no
+    # public route to a file in the image. Null when the file is missing.
+    logo: str | None = None
+    letterhead: PreviewLetterhead
+    banner: str
+    pairs: list[tuple[PreviewPanel, PreviewPanel]]
+    terms: PreviewPanel
+    currency: str
+    columns: list[PreviewColumn]
+    rows: list[list[str]]
+    totals: list[PreviewTotal]
+
+
+@router.get("/{record_id}/rfq/quotation", status_code=status.HTTP_200_OK)
+async def preview_quotation(
+    record_id: str,
+    records: RecordsDep,
+    catalog: CatalogDep,
+    logo: QuotationLogoDep,
+    format: Literal["sg", "uae"] = "sg",
+) -> QuotationPreview:
+    """What `quotation.pdf` would print, as data for the page to draw.
+
+    The same rule as the PDF - a 409 until the pricing is approved - and the
+    same quotation built the same way, so the preview can never show a number
+    the download would not.
+    """
+    record, detail = await _approved(record_id, records, catalog)
+    page = layout(_quotation(record, detail, format))
+    return _preview(page, await asyncio.to_thread(_data_uri, logo))
 
 
 @router.get("/{record_id}/rfq/customer-file.xlsx", status_code=status.HTTP_200_OK)
@@ -510,6 +583,65 @@ async def download_quote_workbook(
         media_type="application/vnd.ms-excel.sheet.macroEnabled.12",
         headers={"Content-Disposition": f'attachment; filename="{name}"'},
     )
+
+
+def _quotation(record: EmailRecord, detail: RfqDetail, format: str) -> Quotation:
+    """The quotation on one office's letterhead - for the PDF and its preview alike."""
+    approval = record.approval
+    if approval is None:  # `_approved` has refused this already
+        raise HTTPException(status.HTTP_409_CONFLICT, "This pricing has not been approved yet")
+    return Quotation(
+        issuer=LETTERHEADS[format],
+        number=detail.reference,
+        customer=detail.customer_name,
+        customer_email=detail.customer_name,
+        port=detail.port,
+        vessel=detail.vessel_name,
+        imo=detail.imo,
+        received_on=date.fromisoformat(detail.received_on) if detail.received_on else None,
+        approved_at=approval.approved_at,
+        lines=[_quoted(row) for row in detail.lines],
+    )
+
+
+def _preview(page: Layout, logo: str | None) -> QuotationPreview:
+    """The layout, field for field, on the wire."""
+
+    def panel(one) -> PreviewPanel:
+        return PreviewPanel(title=one.title, rows=list(one.rows), tall=one.tall)
+
+    issuer = page.issuer
+    return QuotationPreview(
+        logo=logo,
+        letterhead=PreviewLetterhead(
+            name=issuer.name,
+            address=issuer.address,
+            registration=issuer.registration,
+            phone=issuer.phone,
+            email=issuer.email,
+            web=issuer.web,
+        ),
+        banner=page.banner,
+        pairs=[(panel(left), panel(right)) for left, right in page.pairs],
+        terms=panel(page.terms),
+        currency=page.currency,
+        columns=[
+            PreviewColumn(name=one.name, align=one.align, width=one.width) for one in page.columns
+        ],
+        rows=[list(row) for row in page.rows],
+        totals=[
+            PreviewTotal(label=one.label, value=one.value, strong=one.strong, shaded=one.shaded)
+            for one in page.totals
+        ],
+    )
+
+
+def _data_uri(path: Path | None) -> str | None:
+    """The logo inline. None when there is no file - the preview then goes
+    without it, as the PDF does."""
+    if path is None or not path.is_file():
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
 
 
 async def _approved(
@@ -680,9 +812,19 @@ async def price_line(record_id: str, index: int, body: Offer, records: RecordsDe
     """Record what a supplier quoted for one unit of this line.
 
     No check against the sheet, unlike a confirmation: a price is the
-    supplier's to name, and ours to believe or not. The only thing refused
-    here is a number that cannot be one.
+    supplier's to name, and ours to believe or not.
+
+    **Only for a line somebody was asked about.** A supplier answers an
+    inquiry; a price for a line no letter went out for would be an answer to
+    a question nobody put. The screen keeps `Load sample supplier response`
+    shut until the inquiries are sent, and a rule that lives only in a button
+    is not one - so a 409 here, and a 404 for a line the RFQ does not have.
     """
+    record = await records.read(record_id)
+    if record is None or all(match.index != index for match in record.matching):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such line")
+    if all(index not in one.lines for one in record.inquiries):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Nobody has been asked about this line yet")
     if not await records.price(record_id, index, body.unit_price):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such line")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

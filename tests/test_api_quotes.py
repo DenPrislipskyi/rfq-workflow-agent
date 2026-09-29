@@ -58,6 +58,7 @@ from src.infrastructure.storage.records import (
 URL = "/api/v1/quotes"
 CUSTOMER_TEMPLATE = Path(__file__).parents[1] / "config" / "quotation_customer_file_template.xlsx"
 QUOTE_TEMPLATE = Path(__file__).parents[1] / "config" / "quotation_sg_uae_workbook_template.xlsm"
+LOGO = Path(__file__).parents[1] / "config" / "quotation_pdf_logo.jpg"
 BODY = "Dear Sir/Madam, you may find attached our RFQ for Engine Materials."
 
 
@@ -614,8 +615,16 @@ def _offer(record_id: str, index: int) -> str:
     return f"{URL}/{record_id}/rfq/lines/{index}/offer"
 
 
-async def test_a_line_carries_what_a_supplier_quoted_for_one_unit(tmp_path: Path):
+async def _asked(tmp_path: Path):
+    """The shortlisted RFQ, with its line 7 asked about - a supplier can only
+    answer a letter that went out."""
     records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    assert client(records).put(_inquiries(record_id), json=ASKED).status_code == 204
+    return records, record_id
+
+
+async def test_a_line_carries_what_a_supplier_quoted_for_one_unit(tmp_path: Path):
+    records, record_id = await _asked(tmp_path)
     page = client(records)
 
     assert page.put(_offer(record_id, 7), json={"unitPrice": 24.5}).status_code == 204
@@ -635,7 +644,7 @@ async def test_a_line_nobody_quoted_carries_no_price_rather_than_zero(tmp_path: 
 
 
 async def test_a_withdrawn_offer_leaves_the_line_unpriced(tmp_path: Path):
-    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    records, record_id = await _asked(tmp_path)
     page = client(records)
     page.put(_offer(record_id, 7), json={"unitPrice": 24.5})
 
@@ -655,6 +664,17 @@ async def test_a_price_no_supplier_could_have_named_is_refused(tmp_path: Path):
     assert page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]["offerUnitPrice"] is None
 
 
+async def test_a_line_nobody_was_asked_about_cannot_be_priced(tmp_path: Path):
+    """A supplier answers a letter; there is none for this line yet. The screen
+    keeps the sample response shut until the inquiries are sent, and so does
+    the endpoint."""
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    page = client(records)
+
+    assert page.put(_offer(record_id, 7), json={"unitPrice": 24.5}).status_code == 409
+    assert page.get(f"{URL}/{record_id}/rfq").json()["lines"][0]["offerUnitPrice"] is None
+
+
 async def test_a_line_nobody_has_cannot_be_priced(tmp_path: Path):
     records, record_id = await _rfq_with_a_shortlist(tmp_path)
 
@@ -663,7 +683,7 @@ async def test_a_line_nobody_has_cannot_be_priced(tmp_path: Path):
 
 async def test_a_price_and_a_confirmation_do_not_disturb_each_other(tmp_path: Path):
     """Two separate decisions on one line: which product, and what it costs."""
-    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    records, record_id = await _asked(tmp_path)
     page = client(records)
 
     page.put(_confirmation(record_id, 7), json={"itemCode": "T69133100"})
@@ -684,7 +704,7 @@ async def test_an_unsettled_line_still_shows_what_the_agent_found(tmp_path: Path
 
 async def test_a_priced_line_carries_the_moment_the_price_arrived(tmp_path: Path):
     """The responses screen dates a supplier's reply by this."""
-    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    records, record_id = await _asked(tmp_path)
     page = client(records)
 
     page.put(_offer(record_id, 7), json={"unitPrice": 24.5})
@@ -701,7 +721,7 @@ async def test_an_unpriced_line_carries_no_moment(tmp_path: Path):
 
 async def test_a_withdrawn_offer_takes_its_moment_with_it(tmp_path: Path):
     """A line with no price but a date on it would read as a reply we lost."""
-    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    records, record_id = await _asked(tmp_path)
     page = client(records)
     page.put(_offer(record_id, 7), json={"unitPrice": 24.5})
 
@@ -892,7 +912,7 @@ async def test_a_price_or_a_margin_no_desk_could_have_meant_is_refused(tmp_path:
 
 
 async def test_an_approved_price_does_not_follow_the_supplier_afterwards(tmp_path: Path):
-    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    records, record_id = await _asked(tmp_path)
     page = client(records)
     page.put(_approval(record_id), json=SIGNED)
 
@@ -911,7 +931,7 @@ def _pdf_text(content: bytes) -> str:
 
 
 async def _approved(tmp_path: Path):
-    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+    records, record_id = await _asked(tmp_path)
     page = client(records)
     page.put(_confirmation(record_id, 7), json={"itemCode": "T69133100"})
     page.put(
@@ -1056,4 +1076,61 @@ async def test_there_is_no_quote_workbook_for_an_office_we_do_not_have(tmp_path:
     page, record_id = await _approved(tmp_path)
 
     assert page.get(_quote_workbook(record_id), params={"format": "fr"}).status_code == 422
+
+
+def _preview(record_id: str) -> str:
+    return f"{URL}/{record_id}/rfq/quotation"
+
+
+async def test_the_preview_says_what_the_pdf_prints(tmp_path: Path):
+    """Built from the same layout: every word the preview shows, the PDF has."""
+    page, record_id = await _approved(tmp_path)
+
+    preview = page.get(_preview(record_id), params={"format": "sg"}).json()
+    pdf = _pdf_text(page.get(_quotation(record_id), params={"format": "sg"}).content)
+
+    assert preview["letterhead"]["name"] == "Seven Seas Maritime Services (Singapore) Pte. Ltd"
+    assert preview["banner"] in pdf
+    assert [one["name"] for one in preview["columns"]] == [
+        "Sr No", "Identification", "Description", "Qty", "Uom", "UnitPrice", "Total",
+    ]
+    [row] = preview["rows"]
+    assert row[1] == "T69133100" and row[5] == "28.00"
+    for value in row:
+        assert value in pdf
+    total = preview["totals"][-1]
+    assert (total["label"], total["strong"]) == ("Total Price(USD)", True)
+    assert total["value"] in pdf
+
+
+async def test_the_uae_preview_carries_the_dubai_form(tmp_path: Path):
+    page, record_id = await _approved(tmp_path)
+
+    preview = page.get(_preview(record_id), params={"format": "uae"}).json()
+
+    assert preview["letterhead"]["name"] == "Seven Seas Shipchandlers (L.L.C)"
+    assert "VAT%" in [one["name"] for one in preview["columns"]]
+    assert [one["label"] for one in preview["totals"]][-2] == "VAT"
+
+
+async def test_the_preview_carries_its_logo_inline(tmp_path: Path):
+    """No second request and no public route to a file inside the image."""
+    page, record_id = await _approved(tmp_path)
+    page.app.dependency_overrides[get_quotation_logo] = lambda: LOGO
+
+    preview = page.get(_preview(record_id)).json()
+
+    assert preview["logo"].startswith("data:image/jpeg;base64,")
+
+
+async def test_there_is_no_preview_before_the_pricing_is_approved(tmp_path: Path):
+    records, record_id = await _rfq_with_a_shortlist(tmp_path)
+
+    assert client(records).get(_preview(record_id)).status_code == 409
+
+
+async def test_there_is_no_preview_for_a_letterhead_nobody_has(tmp_path: Path):
+    page, record_id = await _approved(tmp_path)
+
+    assert page.get(_preview(record_id), params={"format": "fr"}).status_code == 422
 

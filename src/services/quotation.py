@@ -195,8 +195,132 @@ class Quotation:
         return self.subtotal + (self.vat if self.issuer.taxed else Decimal(0))
 
 
+@dataclass(frozen=True, slots=True)
+class Panel:
+    """A grey heading over label/value rows, as every block of the form is."""
+
+    title: str
+    rows: tuple[tuple[str, str], ...]
+    # Room for three lines under the last row, as the billing address has on
+    # the desk's form whether or not there is anything to put there.
+    tall: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Column:
+    """One column of the line items: its heading, how its cells align, and
+    its width in points as the PDF sets it - a preview drawing the same table
+    divides the page the same way."""
+
+    name: str
+    align: str
+    width: float
+
+
+@dataclass(frozen=True, slots=True)
+class Total:
+    label: str
+    value: str
+    # Set in the larger bold face, as Subtotal and the final total are.
+    strong: bool = False
+    # On a grey band, as Subtotal is.
+    shaded: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Layout:
+    """What the document says, block by block, with every value already
+    written as the page prints it.
+
+    The PDF is drawn from this, and so is the on-screen preview: one place
+    decides the wording, the dates, the columns and the totals, so the two
+    cannot drift apart. What only paper has - page size, margins, page breaks,
+    `Page n of N` - stays in `render`.
+    """
+
+    issuer: Issuer
+    banner: str
+    pairs: tuple[tuple[Panel, Panel], ...]
+    terms: Panel
+    currency: str
+    columns: tuple[Column, ...]
+    rows: tuple[tuple[str, ...], ...]
+    totals: tuple[Total, ...]
+
+
+def layout(quotation: Quotation) -> Layout:
+    """The quotation, laid out block by block as the desk's form has it."""
+    taxed = quotation.issuer.taxed
+    return Layout(
+        issuer=quotation.issuer,
+        banner=f"Quotation For {quotation.customer}",
+        pairs=(
+            (
+                Panel("Customer Address", (("Billing Address", ""),), tall=True),
+                Panel(
+                    "Seven Seas Contact Details",
+                    (("Seven Seas Contact Person", ""), ("Email-Id", quotation.issuer.email)),
+                ),
+            ),
+            (
+                Panel(
+                    "RFQ Details",
+                    (
+                        # The customer's own RFQ number is still ours to read out
+                        # of their subject line; until then it is blank, as on screen.
+                        ("Reference", ""),
+                        ("Contact", ""),
+                        ("Phone", ""),
+                        ("Email", quotation.customer_email),
+                    ),
+                ),
+                Panel(
+                    "Port and Dates",
+                    (
+                        ("Port", quotation.port),
+                        ("Lead Time (Days)", ""),
+                        ("RFQ Received Date", _day(quotation.received_on)),
+                        ("Offer Valid Till", _day(quotation.valid_till)),
+                    ),
+                ),
+            ),
+            (
+                Panel(
+                    "Vessel Details",
+                    (("Vessel Name", quotation.vessel), ("IMO Number", quotation.imo)),
+                ),
+                Panel(
+                    "Seven Seas Reference",
+                    (("Quotation Number", quotation.number), ("Seven Seas Client Code", "")),
+                ),
+            ),
+        ),
+        terms=Panel("Supplier Terms and Condition", (("Comments", TERMS), ("Payment Terms", ""))),
+        currency=quotation.currency,
+        columns=_TAXED_COLUMNS if taxed else _COLUMNS,
+        rows=tuple(_cells(line, taxed) for line in quotation.lines),
+        totals=_totals_of(quotation),
+    )
+
+
+def _totals_of(quotation: Quotation) -> tuple[Total, ...]:
+    # Freight and other charges are not something this desk quotes yet; zero is
+    # what its own quotations print when there are none.
+    totals = [
+        Total("Subtotal", _money(quotation.subtotal), strong=True, shaded=True),
+        Total("Freight ( + )", "0.00"),
+        Total("Other ( + )", "0.00"),
+    ]
+    if quotation.issuer.taxed:
+        totals.append(Total("VAT", _money(quotation.vat)))
+    totals.append(
+        Total(f"Total Price({quotation.currency})", _money(quotation.grand_total), strong=True)
+    )
+    return tuple(totals)
+
+
 def render(quotation: Quotation, logo: Path | None = None) -> bytes:
-    """The quotation as PDF bytes."""
+    """The quotation as PDF bytes, drawn from its `layout`."""
     out = BytesIO()
     document = SimpleDocTemplate(
         out,
@@ -208,71 +332,21 @@ def render(quotation: Quotation, logo: Path | None = None) -> bytes:
         title=f"Quotation {quotation.number}".strip(),
         author=quotation.issuer.name,
     )
+    page = layout(quotation)
+    left, right = PANEL_LEFT, PANEL_RIGHT
     story = [
-        _letterhead(quotation.issuer, logo),
-        Paragraph(f"Quotation For {_text(quotation.customer)}", _BANNER),
+        _letterhead(page.issuer, logo),
+        Paragraph(_text(page.banner), _BANNER),
         Spacer(0, 8),
-        _pair(
-            _panel(
-                "Customer Address", [("Billing Address", "")], PANEL_LEFT, label=108, tall=True
-            ),
-            _panel(
-                "Seven Seas Contact Details",
-                [("Seven Seas Contact Person", ""), ("Email-Id", quotation.issuer.email)],
-                PANEL_RIGHT,
-                label=96,
-            ),
+        *(
+            _pair(_panel(one, left, label=108), _panel(other, right, label=96))
+            for one, other in page.pairs
         ),
-        _pair(
-            _panel(
-                "RFQ Details",
-                [
-                    # The customer's own RFQ number is still ours to read out
-                    # of their subject line; until then it is blank, as on screen.
-                    ("Reference", ""),
-                    ("Contact", ""),
-                    ("Phone", ""),
-                    ("Email", quotation.customer_email),
-                ],
-                PANEL_LEFT,
-                label=108,
-            ),
-            _panel(
-                "Port and Dates",
-                [
-                    ("Port", quotation.port),
-                    ("Lead Time (Days)", ""),
-                    ("RFQ Received Date", _day(quotation.received_on)),
-                    ("Offer Valid Till", _day(quotation.valid_till)),
-                ],
-                PANEL_RIGHT,
-                label=96,
-            ),
-        ),
-        _pair(
-            _panel(
-                "Vessel Details",
-                [("Vessel Name", quotation.vessel), ("IMO Number", quotation.imo)],
-                PANEL_LEFT,
-                label=108,
-            ),
-            _panel(
-                "Seven Seas Reference",
-                [("Quotation Number", quotation.number), ("Seven Seas Client Code", "")],
-                PANEL_RIGHT,
-                label=96,
-            ),
-        ),
-        _panel(
-            "Supplier Terms and Condition",
-            [("Comments", TERMS), ("Payment Terms", "")],
-            WIDTH,
-            label=93,
-        ),
+        _panel(page.terms, WIDTH, label=93),
         Spacer(0, 10),
-        _items(quotation),
+        _items(page),
         Spacer(0, 10),
-        _totals(quotation),
+        _totals(page),
     ]
     document.build(story, canvasmaker=_PagedCanvas)
     return out.getvalue()
@@ -335,23 +409,14 @@ def _logo(path: Path | None) -> Image | str:
         return ""
 
 
-def _panel(
-    title: str,
-    rows: Sequence[tuple[str, str]],
-    width: float,
-    *,
-    label: float,
-    tall: bool = False,
-) -> Table:
-    """A grey heading over label/value rows, as every block of the form is."""
-    data = [[Paragraph(_text(title), _TITLE), ""]]
+def _panel(panel: Panel, width: float, *, label: float) -> Table:
+    data = [[Paragraph(_text(panel.title), _TITLE), ""]]
     data += [
-        [Paragraph(_text(name), _LABEL), Paragraph(_text(value), _BODY)] for name, value in rows
+        [Paragraph(_text(name), _LABEL), Paragraph(_text(value), _BODY)]
+        for name, value in panel.rows
     ]
-    # The billing address gets room for three lines, as on the desk's form,
-    # whether or not there is anything to put there.
     heights = [None] * len(data)
-    if tall:
+    if panel.tall:
         heights[-1] = 32
     table = Table(data, colWidths=[label, width - label], rowHeights=heights)
     table.setStyle(
@@ -390,64 +455,77 @@ def _pair(left: Table, right: Table) -> Table:
 # Sr No, Identification, Description, Qty, Uom, UnitPrice, Total. Both desk
 # forms have a pack size between Uom and the price; it is left out, as it is
 # on the screen, and its width goes to the description.
-_COLUMNS = [59.9, 90.9, 329.3, 66.8, 62.0, 86.6, 84.7]
-_NAMES = ["Sr No", "Identification", "Description", "Qty", "Uom", "UnitPrice", "Total"]
+_COLUMNS = (
+    Column("Sr No", "center", 59.9),
+    Column("Identification", "left", 90.9),
+    Column("Description", "left", 329.3),
+    Column("Qty", "right", 66.8),
+    Column("Uom", "left", 62.0),
+    Column("UnitPrice", "right", 86.6),
+    Column("Total", "right", 84.7),
+)
 
-# The Dubai form: Sr No, Identification, Description, Qty, Uom, Rate,
-# Discount, Amount, VAT%, Tax Amount, Net Total - measured off
-# `docs/samples/PDFQuote-UAE.pdf`, with its `Pack Size` width given to the description.
-_TAXED_COLUMNS = [33.3, 64.2, 276.7, 41.6, 36.3, 59.7, 40.9, 66.7, 41.0, 52.7, 67.1]
-_TAXED_NAMES = [
-    "Sr No",
-    "Identification",
-    "Description",
-    "Qty",
-    "Uom",
-    "Rate",
-    "Discount ( - )",
-    "Amount",
-    "VAT%",
-    "Tax Amount",
-    "Net Total",
-]
+# The Dubai form, measured off `docs/samples/PDFQuote-UAE.pdf`, with its
+# `Pack Size` width given to the description.
+_TAXED_COLUMNS = (
+    Column("Sr No", "center", 33.3),
+    Column("Identification", "left", 64.2),
+    Column("Description", "left", 276.7),
+    Column("Qty", "right", 41.6),
+    Column("Uom", "left", 36.3),
+    Column("Rate", "right", 59.7),
+    Column("Discount ( - )", "right", 40.9),
+    Column("Amount", "right", 66.7),
+    Column("VAT%", "right", 41.0),
+    Column("Tax Amount", "right", 52.7),
+    Column("Net Total", "right", 67.1),
+)
 
 
-def _cells(line: QuotedLine, taxed: bool) -> list[Paragraph]:
-    first = [
-        Paragraph(str(line.number), _BODY_CENTER),
-        Paragraph(_text(line.code), _BODY),
-        Paragraph(_text(line.description), _BODY),
-        Paragraph(_text(_quantity(line.quantity)), _BODY_RIGHT),
-        Paragraph(_text(line.uom), _BODY),
-        Paragraph(_money(line.unit_price), _BODY_RIGHT),
-    ]
+def _cells(line: QuotedLine, taxed: bool) -> tuple[str, ...]:
+    """One line's cells, written as the page prints them."""
+    first = (
+        str(line.number),
+        line.code,
+        line.description,
+        _quantity(line.quantity),
+        line.uom,
+        _money(line.unit_price),
+    )
     if not taxed:
-        return [*first, Paragraph(_money(line.total), _BODY_RIGHT)]
-    return [
+        return (*first, _money(line.total))
+    return (
         *first,
-        Paragraph(_money(DISCOUNT), _BODY_RIGHT),
-        Paragraph(_money(line.amount), _BODY_RIGHT),
-        Paragraph(f"{_money(VAT_RATE)}%", _BODY_RIGHT),
-        Paragraph(_money(line.tax), _BODY_RIGHT),
-        Paragraph(_money(line.net), _BODY_RIGHT),
-    ]
+        _money(DISCOUNT),
+        _money(line.amount),
+        f"{_money(VAT_RATE)}%",
+        _money(line.tax),
+        _money(line.net),
+    )
 
 
-def _items(quotation: Quotation) -> Table:
-    taxed = quotation.issuer.taxed
-    widths = _TAXED_COLUMNS if taxed else _COLUMNS
-    names = _TAXED_NAMES if taxed else _NAMES
+def _items(page: Layout) -> Table:
+    widths = [column.width for column in page.columns]
     last = len(widths) - 1
     # Three grey blocks, as on both desk forms: the title over the text
     # columns, an empty one over `Qty`, and the currency over the numbers.
     heading: list[Paragraph | str] = [""] * len(widths)
     heading[0] = Paragraph("Line Items", _TITLE_LEFT)
-    heading[4] = Paragraph(f"Currency: {_text(quotation.currency)}", _TITLE_RIGHT)
-    columns = [Paragraph(name, _LABEL if i == 0 else _LABEL_CENTER) for i, name in enumerate(names)]
-    rows = [_cells(line, taxed) for line in quotation.lines]
+    heading[4] = Paragraph(f"Currency: {_text(page.currency)}", _TITLE_RIGHT)
+    names = [
+        Paragraph(_text(column.name), _LABEL if index == 0 else _LABEL_CENTER)
+        for index, column in enumerate(page.columns)
+    ]
+    rows = [
+        [
+            Paragraph(_text(value), _BODY_BY_ALIGN[column.align])
+            for value, column in zip(row, page.columns, strict=True)
+        ]
+        for row in page.rows
+    ]
     # Both heading rows repeat on every page: a second page of numbers with no
     # column names over them is a page nobody can read on its own.
-    table = Table([heading, columns, *rows], colWidths=widths, repeatRows=2)
+    table = Table([heading, names, *rows], colWidths=widths, repeatRows=2)
     table.setStyle(
         TableStyle(
             [
@@ -467,27 +545,24 @@ def _items(quotation: Quotation) -> Table:
     return table
 
 
-def _totals(quotation: Quotation) -> Table:
+def _totals(page: Layout) -> Table:
     data = [
-        [Paragraph("Subtotal", _TITLE_LEFT), Paragraph(_money(quotation.subtotal), _TITLE_RIGHT)],
-        # Freight and other charges are not something this desk quotes yet;
-        # zero is what its own quotations print when there are none.
-        [Paragraph("Freight ( + )", _BODY), Paragraph("0.00", _BODY_RIGHT)],
-        [Paragraph("Other ( + )", _BODY), Paragraph("0.00", _BODY_RIGHT)],
-    ]
-    if quotation.issuer.taxed:
-        data.append([Paragraph("VAT", _BODY), Paragraph(_money(quotation.vat), _BODY_RIGHT)])
-    data.append(
         [
-            Paragraph(f"Total Price({_text(quotation.currency)})", _TITLE_LEFT),
-            Paragraph(_money(quotation.grand_total), _TITLE_RIGHT),
+            Paragraph(_text(total.label), _TITLE_LEFT if total.strong else _BODY),
+            Paragraph(_text(total.value), _TITLE_RIGHT if total.strong else _BODY_RIGHT),
         ]
-    )
+        for total in page.totals
+    ]
+    shaded = [
+        ("BACKGROUND", (0, row), (-1, row), HEADING)
+        for row, total in enumerate(page.totals)
+        if total.shaded
+    ]
     inner = Table(data, colWidths=[181.5, PANEL_RIGHT - 181.5])
     inner.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), HEADING),
+                *shaded,
                 ("GRID", (0, 0), (-1, -1), 0.5, RULE),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 2),
@@ -582,6 +657,7 @@ _BODY_RIGHT = ParagraphStyle("body-right", parent=_BODY, alignment=TA_RIGHT)
 _BODY_CENTER = ParagraphStyle("body-center", parent=_BODY, alignment=TA_CENTER)
 _LABEL = ParagraphStyle("label", parent=_BODY, fontName="Helvetica-Bold")
 _LABEL_CENTER = ParagraphStyle("label-center", parent=_LABEL, alignment=TA_CENTER)
+_BODY_BY_ALIGN = {"left": _BODY, "center": _BODY_CENTER, "right": _BODY_RIGHT}
 _TITLE = ParagraphStyle(
     "title", fontName="Helvetica-Bold", fontSize=TITLE, leading=TITLE + 2, alignment=TA_CENTER
 )
