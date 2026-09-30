@@ -264,7 +264,7 @@ def _line_row(line: BookLine, row: int, styles: dict[str, str]) -> str:
     cells = {
         "A": _number(line.number),
         "B": _text(line.customer_code),
-        "C": _text(line.code),
+        "C": _text(line.customer_code),
         "D": _text(line.customer_description),
         # Country of origin and brand: nothing we hold says either.
         "E": _text(""),

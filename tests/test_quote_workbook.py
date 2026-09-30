@@ -172,7 +172,7 @@ def test_each_line_carries_both_sides():
     assert row == [
         1,
         "04361753",
-        "T33116401",
+        "04361753",
         "CHIN STRAP FOR MUNDO SAFETY HELMET (SF-06B)",
         None,
         None,

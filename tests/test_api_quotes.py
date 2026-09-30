@@ -1062,7 +1062,8 @@ async def test_the_quote_workbook_carries_the_approved_price_and_the_office(tmp_
     lines = workbook[workbook.sheetnames[1]]
 
     assert workbook["SUMMARY"]["C15"].value == "100569476300003"
-    assert lines["C11"].value == "T69133100"
+    # `Code` is the customer's code, and this sheet records none for the product.
+    assert lines["C11"].value is None
     assert lines["K11"].value == 28
 
 
