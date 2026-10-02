@@ -339,6 +339,8 @@ async def test_an_rfq_reads_as_its_lines(tmp_path: Path):
     body = client(records).get(f"{URL}/{record_id}/rfq").json()
 
     assert body["customerName"] == "purchasing@newcompany.example.com"
+    # The quotation goes back out from the mailbox the RFQ came in to.
+    assert body["mailbox"] == "supply@ourcompany.example.com"
     assert body["vesselName"] == ""  # this record carries no extraction
     line = body["lines"][0]
     assert line["line"] == 1

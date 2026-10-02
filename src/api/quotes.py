@@ -390,6 +390,9 @@ class RfqDetail(Wire):
     port: str = ""
     received_on: str = ""
     subject: str = ""
+    # The mailbox the RFQ arrived in - the address the quotation goes back
+    # out from. Empty for a record that came in by any other way.
+    mailbox: str = ""
     lines: list[MatchRow] = Field(default_factory=list)
     # What was asked of the suppliers. Empty until somebody sends them, and it
     # is what stops the screen offering to send them a second time.
@@ -672,6 +675,7 @@ def _detail(record: EmailRecord, catalog: Catalog) -> RfqDetail:
         port=_header(record, PORT),
         received_on=_received(record),
         subject=record.subject or "",
+        mailbox=record.mailbox or "",
         lines=[
             _line(number, match, catalog)
             for number, match in enumerate(record.matching, start=1)
